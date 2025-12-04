@@ -1126,14 +1126,13 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             (pix_per_path - 1) as f64
         };
 
-        // Group consecutive bins with same color for efficiency
+        // Merge consecutive bins with same color into single rectangles
         let mut bin_list: Vec<(&usize, &BinInfo)> = bins.iter().collect();
         bin_list.sort_by_key(|(idx, _)| **idx);
 
-        for (&bin_idx, bin_info) in bin_list {
-            let x = text_width + (bin_idx as f64).min((viz_width - 1) as f64);
-
-            let (r, g, b) = if args.color_by_mean_depth {
+        // Helper to get color for a bin
+        let get_bin_color = |bin_info: &BinInfo| -> (u8, u8, u8) {
+            if args.color_by_mean_depth {
                 get_depth_color(bin_info.mean_depth)
             } else if args.color_by_mean_inversion_rate {
                 let inv_r = (bin_info.mean_inv * 255.0).min(255.0) as u8;
@@ -1146,11 +1145,44 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 }
             } else {
                 (path_r, path_g, path_b)
-            };
+            }
+        };
 
+        if !bin_list.is_empty() {
+            let mut run_start = *bin_list[0].0;
+            let mut run_color = get_bin_color(bin_list[0].1);
+            let mut run_end = run_start;
+
+            for i in 1..bin_list.len() {
+                let (&bin_idx, bin_info) = bin_list[i];
+                let color = get_bin_color(bin_info);
+
+                // Check if this bin continues the run (consecutive and same color)
+                if bin_idx == run_end + 1 && color == run_color {
+                    run_end = bin_idx;
+                } else {
+                    // Output the previous run
+                    let x = text_width + (run_start as f64).min((viz_width - 1) as f64);
+                    let width = (run_end - run_start + 1) as f64;
+                    svg.push_str(&format!(
+                        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                        x, y_start, width, rect_height, run_color.0, run_color.1, run_color.2
+                    ));
+                    svg.push('\n');
+
+                    // Start a new run
+                    run_start = bin_idx;
+                    run_color = color;
+                    run_end = bin_idx;
+                }
+            }
+
+            // Output the final run
+            let x = text_width + (run_start as f64).min((viz_width - 1) as f64);
+            let width = (run_end - run_start + 1) as f64;
             svg.push_str(&format!(
-                r#"<rect x="{}" y="{}" width="1" height="{}" fill="rgb({},{},{})"/>"#,
-                x, y_start, rect_height, r, g, b
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                x, y_start, width, rect_height, run_color.0, run_color.1, run_color.2
             ));
             svg.push('\n');
         }
