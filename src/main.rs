@@ -199,6 +199,16 @@ struct Graph {
     edges: Vec<Edge>,
 }
 
+/// Canonical edge key for deduplication
+fn edge_key(from_id: u64, from_rev: bool, to_id: u64, to_rev: bool) -> (u64, bool, u64, bool) {
+    // Normalize edge direction for deduplication
+    if from_id < to_id || (from_id == to_id && !from_rev) {
+        (from_id, from_rev, to_id, to_rev)
+    } else {
+        (to_id, !to_rev, from_id, !from_rev)
+    }
+}
+
 impl Graph {
     fn new() -> Self {
         Graph {
@@ -371,7 +381,10 @@ fn parse_gfa(path: &PathBuf, progress: bool) -> std::io::Result<Graph> {
         );
     }
 
-    // Second pass: collect paths and edges
+    // Use a set to deduplicate edges
+    let mut edge_set: std::collections::HashSet<(u64, bool, u64, bool)> = std::collections::HashSet::new();
+
+    // Second pass: collect paths and edges (from L-lines)
     let file2 = File::open(path)?;
     let reader2 = BufReader::new(file2);
     for line in reader2.lines() {
@@ -447,15 +460,29 @@ fn parse_gfa(path: &PathBuf, progress: bool) -> std::io::Result<Graph> {
                     graph.segment_name_to_id.get(from_name),
                     graph.segment_name_to_id.get(to_name),
                 ) {
-                    graph.edges.push(Edge {
-                        from_id,
-                        from_rev: from_orient == "-",
-                        to_id,
-                        to_rev: to_orient == "-",
-                    });
+                    let from_rev = from_orient == "-";
+                    let to_rev = to_orient == "-";
+                    edge_set.insert(edge_key(from_id, from_rev, to_id, to_rev));
                 }
             }
         }
+    }
+
+    // Third pass: add edges from consecutive path steps (implicit edges)
+    for path in &graph.paths {
+        for window in path.steps.windows(2) {
+            let from = &window[0];
+            let to = &window[1];
+            // Edge from end of 'from' to start of 'to'
+            // from_rev=true means we're going through from in reverse, so edge starts from beginning
+            // to_rev=true means we're entering to in reverse, so edge goes to end
+            edge_set.insert(edge_key(from.segment_id, from.is_reverse, to.segment_id, to.is_reverse));
+        }
+    }
+
+    // Convert edge set to vector
+    for (from_id, from_rev, to_id, to_rev) in edge_set {
+        graph.edges.push(Edge { from_id, from_rev, to_id, to_rev });
     }
 
     if progress {
@@ -713,8 +740,9 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
     let path_space = path_count * pix_per_path;
 
-    // Height for edge visualization area (matching odgi: min(len_to_visualize, height + bottom_padding))
-    let edge_height = (len_to_visualize as u32).min(args.height + bottom_padding);
+    // Height for edge visualization area
+    // In binned mode, odgi uses the viz_width (number of bins) as the len_to_visualize for height calc
+    let edge_height = viz_width.min(args.height + bottom_padding);
 
     let total_width = viz_width + path_names_width;
     let total_height = path_space + edge_height;
