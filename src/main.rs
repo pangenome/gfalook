@@ -325,19 +325,23 @@ const FONT_5X8: [[u8; 8]; 128] = {
 
 const TRAILING_DOTS: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xA8, 0x00];
 
-/// ColorBrewer RdBu 11-class diverging palette (default for -m)
-const COLORBREWER_RDBU_11: [(u8, u8, u8); 11] = [
-    (103, 0, 31),
-    (178, 24, 43),
-    (214, 96, 77),
-    (244, 165, 130),
-    (253, 219, 199),
-    (247, 247, 247),
-    (209, 229, 240),
-    (146, 197, 222),
-    (67, 147, 195),
-    (33, 102, 172),
-    (5, 48, 97),
+/// ColorBrewer Spectral 11-class diverging palette (default for -m)
+/// With two grey colors prepended for low coverage (matching odgi)
+const COLORBREWER_SPECTRAL_13: [(u8, u8, u8); 13] = [
+    (196, 196, 196), // < 0.5x coverage (very low)
+    (128, 128, 128), // < 1.5x coverage (low)
+    // Spectral 11 (reversed from standard order)
+    (158, 1, 66),
+    (213, 62, 79),
+    (244, 109, 67),
+    (253, 174, 97),
+    (254, 224, 139),
+    (255, 255, 191),
+    (230, 245, 152),
+    (171, 221, 164),
+    (102, 194, 165),
+    (50, 136, 189),
+    (94, 79, 162),
 ];
 
 /// Parse a GFA file efficiently
@@ -690,17 +694,17 @@ fn add_edge_point(buffer: &mut [u8], width: u32, x: u32, y: u32, path_space: u32
     }
 }
 
-/// Get color for depth using RdBu colorbrewer palette
+/// Get color for depth using Spectral colorbrewer palette (with grey for low coverage)
 fn get_depth_color(mean_depth: f64) -> (u8, u8, u8) {
-    // Cuts at 0.5, 1.5, 2.5, ..., 10.5
-    let cuts = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5];
+    // Cuts at 0.5, 1.5, 2.5, ..., 12.5 (13 bins for 13 colors)
+    let cuts = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5];
 
     for (i, &cut) in cuts.iter().enumerate() {
         if mean_depth <= cut {
-            return COLORBREWER_RDBU_11[i];
+            return COLORBREWER_SPECTRAL_13[i];
         }
     }
-    COLORBREWER_RDBU_11[10]
+    COLORBREWER_SPECTRAL_13[12]
 }
 
 fn render(args: &Args, graph: &Graph) -> Vec<u8> {
@@ -901,31 +905,47 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             let (a, b) = if a_pos < b_pos { (a_pos, b_pos) } else { (b_pos, a_pos) };
 
-            // dist = (b - a) in bins * bin_width (to bp) * scale_y_edges (to pixels)
-            // This matches odgi's calculation
-            let dist_bp = (b - a) * bin_width;
-            let dist = (dist_bp * scale_y_edges) as u32;
+            // dist = (b - a) * bin_width (in bp), used for vertical extent
+            // odgi calculates this as integer
+            let dist = ((b - a) * bin_width) as u64;
 
-            // Draw vertical line at a
-            let ax = (a as u32).min(viz_width.saturating_sub(1));
-            for i in 0..dist.min(edge_height) {
-                add_edge_point(&mut buffer, total_width, ax + path_names_width, i, path_space, 0);
-                max_y = max_y.max(path_space + i + 1);
+            // Use round() for x coordinates to match odgi's std::round()
+            let ax = (a.round() as u32).min(viz_width.saturating_sub(1));
+            let bx = (b.round() as u32).min(viz_width.saturating_sub(1));
+
+            // Draw vertical line at a - iterate in world coords, scale to pixels
+            // odgi: for (; i < dist; i += 1.0 / scale_y) { add_point(a, i, ...) }
+            let mut i = 0.0f64;
+            while i < dist as f64 {
+                let y = (i * scale_y_edges).round() as u32;
+                if y < edge_height {
+                    add_edge_point(&mut buffer, total_width, ax + path_names_width, y, path_space, 0);
+                    max_y = max_y.max(path_space + y + 1);
+                }
+                i += 1.0 / scale_y_edges;
             }
 
-            // Draw horizontal line from a to b at height dist
-            let bx = (b as u32).min(viz_width.saturating_sub(1));
-            let h = dist.min(edge_height.saturating_sub(1));
-            for x in ax..=bx {
+            // Draw horizontal line from a to b at height i (where loop ended)
+            let h_y = (i * scale_y_edges).round() as u32;
+            let h = h_y.min(edge_height.saturating_sub(1));
+            let mut x_f = a;
+            while x_f <= b {
+                let x = (x_f.round() as u32).min(viz_width.saturating_sub(1));
                 if x < viz_width {
                     add_edge_point(&mut buffer, total_width, x + path_names_width, h, path_space, 0);
                     max_y = max_y.max(path_space + h + 1);
                 }
+                x_f += 1.0; // In binned mode, scale_x is effectively 1
             }
 
             // Draw vertical line at b
-            for i in 0..dist.min(edge_height) {
-                add_edge_point(&mut buffer, total_width, bx + path_names_width, i, path_space, 0);
+            let mut j = 0.0f64;
+            while j < dist as f64 {
+                let y = (j * scale_y_edges).round() as u32;
+                if y < edge_height {
+                    add_edge_point(&mut buffer, total_width, bx + path_names_width, y, path_space, 0);
+                }
+                j += 1.0 / scale_y_edges;
             }
 
             edge_count += 1;
