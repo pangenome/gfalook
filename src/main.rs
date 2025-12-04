@@ -804,7 +804,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             let base_y = path_y * pix_per_path + pix_per_path / 2 - char_size / 2;
             for (i, c) in path.name.chars().take(num_of_chars).enumerate() {
-                let base_x = (left_padding + i) as u32 * char_size;
+                // +3 offset to match odgi's text positioning
+                let base_x = (left_padding + i) as u32 * char_size + 3;
                 let char_data = if i == num_of_chars - 1 && path_name_too_long {
                     &TRAILING_DOTS
                 } else {
