@@ -1229,6 +1229,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let bx = text_width + b.round();
             let base_y = path_space as f64;
 
+            // Skip degenerate edges (zero height and minimal width - not visible)
+            if h < 1.0 && (bx - ax).abs() < 2.0 {
+                continue;
+            }
+
             // Draw U-shaped edge as SVG path
             svg.push_str(&format!(
                 r#"<path d="M{:.1},{:.1} L{:.1},{:.1} L{:.1},{:.1} L{:.1},{:.1}" fill="none" stroke="black" stroke-width="1"/>"#,
