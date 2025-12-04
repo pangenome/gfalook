@@ -740,19 +740,26 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
     let path_space = path_count * pix_per_path;
 
-    // Height for edge visualization area
-    // In binned mode, odgi uses the viz_width (number of bins) as the len_to_visualize for height calc
-    let edge_height = viz_width.min(args.height + bottom_padding);
+    // Height for edge visualization area - matches odgi's calculation
+    // height = min(len_to_visualize, args.height + bottom_padding)
+    // scale_y = height / len_to_visualize
+    let height_param = (args.height + bottom_padding) as u64;
+    let edge_height = (len_to_visualize.min(height_param)) as u32;
+    let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
 
     let total_width = viz_width + path_names_width;
-    let total_height = path_space + edge_height;
+    // Initial height - will be cropped later based on actual edge rendering
+    let max_possible_height = path_space + edge_height;
 
-    let mut buffer = vec![255u8; (total_width * total_height * 4) as usize];
+    let mut buffer = vec![255u8; (total_width * max_possible_height * 4) as usize];
     let mut path_names_buffer = if path_names_width > 0 {
-        vec![255u8; (path_names_width * total_height * 4) as usize]
+        vec![255u8; (path_names_width * max_possible_height * 4) as usize]
     } else {
         Vec::new()
     };
+
+    // Track maximum y coordinate used (for cropping)
+    let mut max_y: u32 = path_space;
 
     let custom_colors: Option<FxHashMap<String, (u8, u8, u8)>> = args
         .path_colors
@@ -854,6 +861,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     }
 
     // Render edges in the bottom area
+    let mut edge_count = 0;
     for edge in &graph.edges {
         let from_id = edge.from_id as usize;
         let to_id = edge.to_id as usize;
@@ -865,6 +873,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             let to_offset = graph.segment_offsets[to_id];
 
             // Calculate edge endpoints based on orientation
+            // For forward orientation, edge exits from end of segment
+            // For reverse orientation, edge exits from start of segment
             let a_pos = if edge.from_rev {
                 from_offset as f64 / bin_width
             } else {
@@ -879,13 +889,16 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             let (a, b) = if a_pos < b_pos { (a_pos, b_pos) } else { (b_pos, a_pos) };
 
-            // Draw edge (vertical + horizontal + vertical)
-            let dist = ((b - a) * bin_width * scale_y) as u32;
+            // dist = (b - a) in bins * bin_width (to bp) * scale_y_edges (to pixels)
+            // This matches odgi's calculation
+            let dist_bp = (b - a) * bin_width;
+            let dist = (dist_bp * scale_y_edges) as u32;
 
             // Draw vertical line at a
             let ax = (a as u32).min(viz_width.saturating_sub(1));
             for i in 0..dist.min(edge_height) {
                 add_edge_point(&mut buffer, total_width, ax + path_names_width, i, path_space, 0);
+                max_y = max_y.max(path_space + i + 1);
             }
 
             // Draw horizontal line from a to b at height dist
@@ -894,6 +907,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             for x in ax..=bx {
                 if x < viz_width {
                     add_edge_point(&mut buffer, total_width, x + path_names_width, h, path_space, 0);
+                    max_y = max_y.max(path_space + h + 1);
                 }
             }
 
@@ -901,8 +915,17 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             for i in 0..dist.min(edge_height) {
                 add_edge_point(&mut buffer, total_width, bx + path_names_width, i, path_space, 0);
             }
+
+            edge_count += 1;
         }
     }
+
+    if args.progress {
+        eprintln!("[gfalook::viz] Drew {} edges", edge_count);
+    }
+
+    // Apply crop - max_y already includes path_space, add padding
+    let total_height = (path_space + edge_height).min(max_y + bottom_padding);
 
     // Combine path names and main image
     if path_names_width > 0 {
@@ -920,10 +943,12 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
     }
 
-    let mut result = Vec::with_capacity(8 + buffer.len());
+    // Return cropped buffer
+    let cropped_size = (total_width * total_height * 4) as usize;
+    let mut result = Vec::with_capacity(8 + cropped_size);
     result.extend_from_slice(&total_width.to_le_bytes());
     result.extend_from_slice(&total_height.to_le_bytes());
-    result.extend_from_slice(&buffer);
+    result.extend_from_slice(&buffer[..cropped_size]);
     result
 }
 
