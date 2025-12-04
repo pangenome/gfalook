@@ -1,0 +1,10 @@
+[package]
+name = "gfalook"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+image = "0.25"
+rustc-hash = "2"
+sha2 = "0.10"
