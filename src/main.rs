@@ -2,7 +2,7 @@ use clap::Parser;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -14,7 +14,7 @@ struct Args {
     #[arg(short = 'i', long = "idx", value_name = "FILE")]
     idx: PathBuf,
 
-    /// Write the visualization in PNG format to this FILE.
+    /// Write the visualization to this FILE (PNG or SVG based on extension).
     #[arg(short = 'o', long = "out", value_name = "FILE")]
     out: PathBuf,
 
@@ -984,6 +984,246 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     result
 }
 
+/// Escape special XML characters
+fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Render graph as SVG with vector fonts
+fn render_svg(args: &Args, graph: &Graph) -> String {
+    let mut display_paths: Vec<&GfaPath> = graph.paths.iter().collect();
+
+    if let Some(ref prefix) = args.ignore_prefix {
+        display_paths.retain(|p| !p.name.starts_with(prefix));
+    }
+
+    if let Some(ref ptd_file) = args.paths_to_display {
+        if let Ok(ptd) = load_paths_to_display(ptd_file) {
+            let ptd_set: std::collections::HashSet<_> = ptd.iter().collect();
+            display_paths.retain(|p| ptd_set.contains(&p.name));
+            let path_map: FxHashMap<&String, &GfaPath> =
+                display_paths.iter().map(|p| (&p.name, *p)).collect();
+            display_paths = ptd.iter().filter_map(|name| path_map.get(name).copied()).collect();
+        }
+    }
+
+    let path_count = display_paths.len() as u32;
+    let pix_per_path = args.path_height.unwrap_or(10);
+
+    let len_to_visualize = graph.total_length;
+    let viz_width = args.width.min(len_to_visualize as u32);
+    let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
+
+    // Calculate text width based on longest path name
+    let max_name_len = display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10);
+    let font_size = (pix_per_path as f64 * 0.8).max(8.0);
+    let char_width = font_size * 0.6; // Approximate monospace character width
+    let text_width = if args.hide_path_names {
+        0.0
+    } else {
+        (max_name_len as f64 * char_width) + 10.0
+    };
+
+    let path_space = path_count * pix_per_path;
+    let bottom_padding = 5u32;
+    let height_param = (args.height + bottom_padding) as u64;
+    let edge_height = (len_to_visualize.min(height_param)) as u32;
+    let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
+
+    let total_width = viz_width as f64 + text_width;
+    let total_height = path_space + edge_height;
+
+    let custom_colors: Option<FxHashMap<String, (u8, u8, u8)>> = args
+        .path_colors
+        .as_ref()
+        .and_then(|p| load_path_colors(p).ok());
+
+    let mut svg = String::new();
+
+    // SVG header
+    svg.push_str(&format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">
+<style>
+  .path-name {{ font-family: 'DejaVu Sans Mono', 'Courier New', monospace; font-size: {}px; }}
+</style>
+<rect width="100%" height="100%" fill="white"/>
+"#,
+        total_width, total_height, total_width, total_height, font_size
+    ));
+
+    // Track max_y for edge rendering
+    let mut max_y: f64 = path_space as f64;
+
+    // Render each path
+    for (path_idx, path) in display_paths.iter().enumerate() {
+        let path_y = path_idx as u32;
+
+        let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
+            colors.get(&path.name).copied()
+                .unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
+        } else {
+            compute_path_color(&path.name, args.color_by_prefix)
+        };
+
+        // Render path name (full name, vector font)
+        if !args.hide_path_names {
+            let text_y = (path_y * pix_per_path) as f64 + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
+            let text_color = if args.color_path_names_background {
+                // White text on colored background
+                svg.push_str(&format!(
+                    r#"<rect x="0" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                    path_y * pix_per_path, text_width, pix_per_path, path_r, path_g, path_b
+                ));
+                svg.push('\n');
+                "white"
+            } else {
+                "black"
+            };
+            svg.push_str(&format!(
+                r#"<text x="5" y="{}" class="path-name" fill="{}">{}</text>"#,
+                text_y, text_color, escape_xml(&path.name)
+            ));
+            svg.push('\n');
+        }
+
+        // Compute bins for this path
+        let mut bins: FxHashMap<usize, BinInfo> = FxHashMap::default();
+
+        for step in &path.steps {
+            let seg_id = step.segment_id as usize;
+            if seg_id < graph.segments.len() {
+                let offset = graph.segment_offsets[seg_id];
+                let seg_len = graph.segments[seg_id].sequence_len;
+
+                for k in 0..seg_len {
+                    let pos = offset + k;
+                    let curr_bin = (pos as f64 / bin_width) as usize;
+                    let entry = bins.entry(curr_bin).or_default();
+                    entry.mean_depth += 1.0;
+                    if step.is_reverse {
+                        entry.mean_inv += 1.0;
+                    }
+                }
+            }
+        }
+
+        // Normalize bin values
+        for (_, v) in bins.iter_mut() {
+            v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
+            v.mean_depth /= bin_width;
+        }
+
+        // Render bins as rectangles
+        let y_start = (path_y * pix_per_path) as f64;
+        let rect_height = if args.no_path_borders || pix_per_path < 3 {
+            pix_per_path as f64
+        } else {
+            (pix_per_path - 1) as f64
+        };
+
+        // Group consecutive bins with same color for efficiency
+        let mut bin_list: Vec<(&usize, &BinInfo)> = bins.iter().collect();
+        bin_list.sort_by_key(|(idx, _)| **idx);
+
+        for (&bin_idx, bin_info) in bin_list {
+            let x = text_width + (bin_idx as f64).min((viz_width - 1) as f64);
+
+            let (r, g, b) = if args.color_by_mean_depth {
+                get_depth_color(bin_info.mean_depth)
+            } else if args.color_by_mean_inversion_rate {
+                let inv_r = (bin_info.mean_inv * 255.0).min(255.0) as u8;
+                (inv_r, 0, 0)
+            } else if args.show_strand {
+                if bin_info.mean_inv > 0.5 {
+                    (200, 50, 50)
+                } else {
+                    (50, 50, 200)
+                }
+            } else {
+                (path_r, path_g, path_b)
+            };
+
+            svg.push_str(&format!(
+                r#"<rect x="{}" y="{}" width="1" height="{}" fill="rgb({},{},{})"/>"#,
+                x, y_start, rect_height, r, g, b
+            ));
+            svg.push('\n');
+        }
+
+        // Add border line if needed
+        if !args.no_path_borders && pix_per_path >= 3 {
+            let border_y = y_start + rect_height;
+            let border_color = if args.black_path_borders { "black" } else { "white" };
+            svg.push_str(&format!(
+                r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>"#,
+                text_width, border_y, total_width, border_y, border_color
+            ));
+            svg.push('\n');
+        }
+    }
+
+    // Render edges as SVG paths
+    for edge in &graph.edges {
+        let from_id = edge.from_id as usize;
+        let to_id = edge.to_id as usize;
+
+        if from_id < graph.segments.len() && to_id < graph.segments.len() {
+            let from_offset = graph.segment_offsets[from_id];
+            let from_len = graph.segments[from_id].sequence_len;
+            let to_offset = graph.segment_offsets[to_id];
+
+            let a_pos = if edge.from_rev {
+                from_offset as f64 / bin_width
+            } else {
+                (from_offset + from_len) as f64 / bin_width
+            };
+
+            let b_pos = if edge.to_rev {
+                (to_offset + graph.segments[to_id].sequence_len) as f64 / bin_width
+            } else {
+                to_offset as f64 / bin_width
+            };
+
+            let (a, b) = if a_pos < b_pos { (a_pos, b_pos) } else { (b_pos, a_pos) };
+            let dist = ((b - a) * bin_width) as f64;
+            let h = (dist * scale_y_edges).min(edge_height as f64 - 1.0);
+
+            let ax = text_width + a.round();
+            let bx = text_width + b.round();
+            let base_y = path_space as f64;
+
+            // Draw U-shaped edge as SVG path
+            svg.push_str(&format!(
+                r#"<path d="M{:.1},{:.1} L{:.1},{:.1} L{:.1},{:.1} L{:.1},{:.1}" fill="none" stroke="black" stroke-width="1"/>"#,
+                ax, base_y,
+                ax, base_y + h,
+                bx, base_y + h,
+                bx, base_y
+            ));
+            svg.push('\n');
+
+            max_y = max_y.max(base_y + h + 1.0);
+        }
+    }
+
+    // Close SVG
+    svg.push_str("</svg>\n");
+
+    // Update viewBox height to crop to actual content
+    let final_height = max_y + bottom_padding as f64;
+    svg = svg.replace(
+        &format!(r#"height="{}" viewBox="0 0 {} {}"#, total_height, total_width, total_height),
+        &format!(r#"height="{}" viewBox="0 0 {} {}"#, final_height, total_width, final_height),
+    );
+
+    svg
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -1003,35 +1243,67 @@ fn main() {
         eprintln!("Warning: No paths found in the GFA file.");
     }
 
+    // Detect output format by file extension
+    let is_svg = args.out.extension()
+        .map(|ext| ext.to_ascii_lowercase() == "svg")
+        .unwrap_or(false);
+
     if args.progress {
-        eprintln!("[gfalook] Rendering image...");
-    }
-
-    let buffer = render(&args, &graph);
-
-    let width = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
-    let height = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-    let pixels = &buffer[8..];
-
-    let mut rgb_pixels = Vec::with_capacity((width * height * 3) as usize);
-    for chunk in pixels.chunks(4) {
-        if chunk.len() >= 3 {
-            rgb_pixels.push(chunk[0]);
-            rgb_pixels.push(chunk[1]);
-            rgb_pixels.push(chunk[2]);
+        if is_svg {
+            eprintln!("[gfalook] Rendering SVG...");
+        } else {
+            eprintln!("[gfalook] Rendering image...");
         }
     }
 
-    if args.progress {
-        eprintln!("[gfalook] Saving to {:?}...", args.out);
-    }
+    if is_svg {
+        // SVG output
+        let svg_content = render_svg(&args, &graph);
 
-    let img = image::RgbImage::from_raw(width, height, rgb_pixels)
-        .expect("Failed to create image from buffer");
+        if args.progress {
+            eprintln!("[gfalook] Saving to {:?}...", args.out);
+        }
 
-    if let Err(e) = img.save(&args.out) {
-        eprintln!("Error saving image: {}", e);
-        std::process::exit(1);
+        let mut file = match File::create(&args.out) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Error creating file: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) = file.write_all(svg_content.as_bytes()) {
+            eprintln!("Error writing SVG: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        // PNG output
+        let buffer = render(&args, &graph);
+
+        let width = u32::from_le_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]);
+        let height = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+        let pixels = &buffer[8..];
+
+        let mut rgb_pixels = Vec::with_capacity((width * height * 3) as usize);
+        for chunk in pixels.chunks(4) {
+            if chunk.len() >= 3 {
+                rgb_pixels.push(chunk[0]);
+                rgb_pixels.push(chunk[1]);
+                rgb_pixels.push(chunk[2]);
+            }
+        }
+
+        if args.progress {
+            eprintln!("[gfalook] Saving to {:?}...", args.out);
+        }
+
+        let img = image::RgbImage::from_raw(width, height, rgb_pixels)
+            .expect("Failed to create image from buffer");
+
+        if let Err(e) = img.save(&args.out) {
+            eprintln!("Error saving image: {}", e);
+            std::process::exit(1);
+        }
     }
 
     if args.progress {
