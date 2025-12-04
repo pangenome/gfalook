@@ -492,7 +492,7 @@ fn parse_gfa(path: &PathBuf, progress: bool) -> std::io::Result<Graph> {
     Ok(graph)
 }
 
-/// Compute SHA256-based path color (matching odgi algorithm)
+/// Compute SHA256-based path color (matching odgi algorithm exactly)
 fn compute_path_color(path_name: &str, color_by_prefix: Option<char>) -> (u8, u8, u8) {
     let hash_input = if let Some(sep) = color_by_prefix {
         path_name.split(sep).next().unwrap_or(path_name)
@@ -504,25 +504,36 @@ fn compute_path_color(path_name: &str, color_by_prefix: Option<char>) -> (u8, u8
     hasher.update(hash_input.as_bytes());
     let result = hasher.finalize();
 
-    let r = result[24];
-    let g = result[8];
-    let b = result[16];
+    let path_r = result[24];
+    let path_g = result[8];
+    let path_b = result[16];
 
-    let sum = r as f32 + g as f32 + b as f32;
+    // Normalize to 0-1 range (divide by 255)
+    let mut path_r_f = path_r as f32 / 255.0;
+    let mut path_g_f = path_g as f32 / 255.0;
+    let mut path_b_f = path_b as f32 / 255.0;
+
+    // Normalize by sum
+    let sum = path_r_f + path_g_f + path_b_f;
     if sum > 0.0 {
-        let r_norm = r as f32 / sum;
-        let g_norm = g as f32 / sum;
-        let b_norm = b as f32 / sum;
-
-        let factor = 1.5f32;
-        let r_out = (r_norm * 255.0 * factor).min(255.0) as u8;
-        let g_out = (g_norm * 255.0 * factor).min(255.0) as u8;
-        let b_out = (b_norm * 255.0 * factor).min(255.0) as u8;
-
-        (r_out, g_out, b_out)
-    } else {
-        (128, 128, 128)
+        path_r_f /= sum;
+        path_g_f /= sum;
+        path_b_f /= sum;
     }
+
+    // Brighten the color (matching odgi's exact formula)
+    let max_component = path_r_f.max(path_g_f).max(path_b_f);
+    let f = if max_component > 0.0 {
+        1.5f32.min(1.0 / max_component)
+    } else {
+        1.0
+    };
+
+    let r_out = (255.0 * (path_r_f * f).min(1.0)).round() as u8;
+    let g_out = (255.0 * (path_g_f * f).min(1.0)).round() as u8;
+    let b_out = (255.0 * (path_b_f * f).min(1.0)).round() as u8;
+
+    (r_out, g_out, b_out)
 }
 
 fn load_path_colors(path: &PathBuf) -> std::io::Result<FxHashMap<String, (u8, u8, u8)>> {
