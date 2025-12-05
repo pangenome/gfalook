@@ -11,166 +11,167 @@ use std::path::PathBuf;
 #[command(name = "gfalook")]
 #[command(about = "Visualize a variation graph in 1D.", long_about = None)]
 struct Args {
-    // MANDATORY OPTIONS
+    // === Input/Output ===
     /// Load the variation graph in GFA format from this FILE.
-    #[arg(short = 'i', long = "idx", value_name = "FILE")]
+    #[arg(short = 'i', long = "idx", value_name = "FILE", help_heading = "Input/Output")]
     idx: PathBuf,
 
     /// Write the visualization to this FILE (PNG or SVG based on extension).
-    #[arg(short = 'o', long = "out", value_name = "FILE")]
+    #[arg(short = 'o', long = "out", value_name = "FILE", help_heading = "Input/Output")]
     out: PathBuf,
 
-    // Visualization Options
+    // === Image Size ===
     /// Set the width in pixels of the output image.
-    #[arg(short = 'x', long = "width", value_name = "N", default_value_t = 1500)]
+    #[arg(short = 'x', long = "width", value_name = "N", default_value_t = 1500, help_heading = "Image Size")]
     width: u32,
 
     /// Set the height in pixels of the output image.
-    #[arg(short = 'y', long = "height", value_name = "N", default_value_t = 500)]
+    #[arg(short = 'y', long = "height", value_name = "N", default_value_t = 500, help_heading = "Image Size")]
     height: u32,
 
     /// The height in pixels for a path.
-    #[arg(short = 'a', long = "path-height", value_name = "N", default_value_t = 10)]
+    #[arg(short = 'a', long = "path-height", value_name = "N", default_value_t = 10, help_heading = "Image Size")]
     path_height: u32,
 
     /// The padding in pixels on the x-axis for a path.
-    #[arg(short = 'X', long = "path-x-padding", value_name = "N", default_value_t = 0)]
+    #[arg(short = 'X', long = "path-x-padding", value_name = "N", default_value_t = 0, help_heading = "Image Size")]
     path_x_padding: u32,
 
-    /// Don't show path borders.
-    #[arg(short = 'n', long = "no-path-borders")]
-    no_path_borders: bool,
-
-    /// Draw path borders in black (default is white).
-    #[arg(short = 'b', long = "black-path-borders")]
-    black_path_borders: bool,
-
-    /// Pack all paths rather than displaying a single path per row.
-    #[arg(short = 'R', long = "pack-paths")]
-    pack_paths: bool,
-
-    /// Show thin links of this relative width to connect path pieces.
-    #[arg(short = 'L', long = "link-path-pieces", value_name = "FLOAT")]
-    link_path_pieces: Option<f64>,
-
-    /// Apply alignment related visual motifs to paths which have this name prefix.
-    #[arg(short = 'A', long = "alignment-prefix", value_name = "STRING")]
-    alignment_prefix: Option<String>,
-
-    /// Use red and blue coloring to display forward and reverse alignments.
-    #[arg(short = 'S', long = "show-strand")]
-    show_strand: bool,
-
-    /// Change the color respect to the node strandness (black for forward, red for reverse).
-    #[arg(short = 'z', long = "color-by-mean-inversion-rate")]
-    color_by_mean_inversion_rate: bool,
-
-    /// Change the color with respect to the uncalled bases.
-    #[arg(short = 'N', long = "color-by-uncalled-bases")]
-    color_by_uncalled_bases: bool,
-
-    /// Color paths by their names looking at the prefix before the given character.
-    #[arg(short = 's', long = "color-by-prefix", value_name = "CHAR")]
-    color_by_prefix: Option<char>,
-
-    /// Read per-path RGB colors from FILE.
-    #[arg(short = 'F', long = "path-colors", value_name = "FILE")]
-    path_colors: Option<PathBuf>,
-
+    // === Clustering ===
     /// Automatically order paths by similarity.
-    #[arg(short = 'k', long = "cluster-paths", conflicts_with = "paths_to_display")]
+    #[arg(short = 'k', long = "cluster-paths", conflicts_with = "paths_to_display", help_heading = "Clustering")]
     cluster_paths: bool,
 
     /// Similarity threshold for cluster detection (automatic if not specified).
-    #[arg(long = "cluster-threshold", value_name = "F", requires = "cluster_paths")]
+    #[arg(long = "cluster-threshold", value_name = "F", requires = "cluster_paths", help_heading = "Clustering")]
     cluster_threshold: Option<f64>,
 
     /// Use all nodes for clustering instead of only variable nodes.
-    #[arg(long = "cluster-all-nodes", requires = "cluster_paths")]
+    #[arg(long = "cluster-all-nodes", requires = "cluster_paths", help_heading = "Clustering")]
     cluster_all_nodes: bool,
 
     /// Gap in pixels between clusters.
-    #[arg(long = "cluster-gap", value_name = "N", requires = "cluster_paths", default_value_t = 10)]
+    #[arg(long = "cluster-gap", value_name = "N", requires = "cluster_paths", default_value_t = 10, help_heading = "Clustering")]
     cluster_gap: u32,
 
-    /// Color nodes listed in FILE in red and all other nodes in grey.
-    #[arg(short = 'J', long = "highlight-node-ids", value_name = "FILE")]
-    highlight_node_ids: Option<PathBuf>,
-
-    /// Merge paths beginning with prefixes listed in FILE.
-    #[arg(short = 'M', long = "prefix-merges", value_name = "FILE")]
-    prefix_merges: Option<PathBuf>,
-
-    /// Ignore paths starting with the given PREFIX.
-    #[arg(short = 'I', long = "ignore-prefix", value_name = "PREFIX")]
-    ignore_prefix: Option<String>,
-
-    // Intervals Selection Options
-    /// Nucleotide range to visualize: STRING=[PATH:]start-end.
-    #[arg(short = 'r', long = "path-range", value_name = "STRING")]
-    path_range: Option<String>,
-
-    // Path Selection Options
+    // === Path Selection ===
     /// List of paths to display in the specified order.
-    #[arg(short = 'p', long = "paths-to-display", value_name = "FILE")]
+    #[arg(short = 'p', long = "paths-to-display", value_name = "FILE", help_heading = "Path Selection")]
     paths_to_display: Option<PathBuf>,
 
-    // Path Names Viz Options
+    /// Ignore paths starting with the given PREFIX.
+    #[arg(short = 'I', long = "ignore-prefix", value_name = "PREFIX", help_heading = "Path Selection")]
+    ignore_prefix: Option<String>,
+
+    /// Nucleotide range to visualize: STRING=[PATH:]start-end.
+    #[arg(short = 'r', long = "path-range", value_name = "STRING", help_heading = "Path Selection")]
+    path_range: Option<String>,
+
+    /// Merge paths beginning with prefixes listed in FILE.
+    #[arg(short = 'M', long = "prefix-merges", value_name = "FILE", help_heading = "Path Selection")]
+    prefix_merges: Option<PathBuf>,
+
+    // === Path Appearance ===
+    /// Don't show path borders.
+    #[arg(short = 'n', long = "no-path-borders", help_heading = "Path Appearance")]
+    no_path_borders: bool,
+
+    /// Draw path borders in black (default is white).
+    #[arg(short = 'b', long = "black-path-borders", help_heading = "Path Appearance")]
+    black_path_borders: bool,
+
+    /// Pack all paths rather than displaying a single path per row.
+    #[arg(short = 'R', long = "pack-paths", help_heading = "Path Appearance")]
+    pack_paths: bool,
+
+    /// Show thin links of this relative width to connect path pieces.
+    #[arg(short = 'L', long = "link-path-pieces", value_name = "FLOAT", help_heading = "Path Appearance")]
+    link_path_pieces: Option<f64>,
+
+    // === Path Names ===
     /// Hide the path names on the left of the generated image.
-    #[arg(short = 'H', long = "hide-path-names")]
+    #[arg(short = 'H', long = "hide-path-names", help_heading = "Path Names")]
     hide_path_names: bool,
 
     /// Color path names background with the same color as paths.
-    #[arg(short = 'C', long = "color-path-names-background")]
+    #[arg(short = 'C', long = "color-path-names-background", help_heading = "Path Names")]
     color_path_names_background: bool,
 
     /// Maximum number of characters to display for each path name.
-    #[arg(short = 'c', long = "max-num-of-characters", value_name = "N")]
+    #[arg(short = 'c', long = "max-num-of-characters", value_name = "N", help_heading = "Path Names")]
     max_num_of_characters: Option<usize>,
 
-    // Binned Mode Options
+    // === Coloring ===
+    /// Color paths by their names looking at the prefix before the given character.
+    #[arg(short = 's', long = "color-by-prefix", value_name = "CHAR", help_heading = "Coloring")]
+    color_by_prefix: Option<char>,
+
+    /// Read per-path RGB colors from FILE.
+    #[arg(short = 'F', long = "path-colors", value_name = "FILE", help_heading = "Coloring")]
+    path_colors: Option<PathBuf>,
+
+    /// Use red and blue coloring to display forward and reverse alignments.
+    #[arg(short = 'S', long = "show-strand", help_heading = "Coloring")]
+    show_strand: bool,
+
+    /// Change the color respect to the node strandness (black for forward, red for reverse).
+    #[arg(short = 'z', long = "color-by-mean-inversion-rate", help_heading = "Coloring")]
+    color_by_mean_inversion_rate: bool,
+
+    /// Change the color with respect to the uncalled bases.
+    #[arg(short = 'N', long = "color-by-uncalled-bases", help_heading = "Coloring")]
+    color_by_uncalled_bases: bool,
+
+    /// Color nodes listed in FILE in red and all other nodes in grey.
+    #[arg(short = 'J', long = "highlight-node-ids", value_name = "FILE", help_heading = "Coloring")]
+    highlight_node_ids: Option<PathBuf>,
+
+    // === Binned Mode ===
     /// The bin width specifies the size of each bin in the binned mode.
-    #[arg(short = 'w', long = "bin-width", value_name = "bp")]
+    #[arg(short = 'w', long = "bin-width", value_name = "bp", help_heading = "Binned Mode")]
     bin_width: Option<f64>,
 
     /// Change the color with respect to the mean coverage.
-    #[arg(short = 'm', long = "color-by-mean-depth")]
+    #[arg(short = 'm', long = "color-by-mean-depth", help_heading = "Binned Mode")]
     color_by_mean_depth: bool,
 
     /// Use the colorbrewer palette specified by SCHEME:N.
-    #[arg(short = 'B', long = "colorbrewer-palette", value_name = "SCHEME:N")]
+    #[arg(short = 'B', long = "colorbrewer-palette", value_name = "SCHEME:N", help_heading = "Binned Mode")]
     colorbrewer_palette: Option<String>,
 
     /// Use the colorbrewer palette for <0.5x and ~1x coverage bins.
-    #[arg(short = 'G', long = "no-grey-depth")]
+    #[arg(short = 'G', long = "no-grey-depth", help_heading = "Binned Mode")]
     no_grey_depth: bool,
 
-    // Gradient Mode Options
+    // === Gradient Mode ===
     /// Change the color darkness based on nucleotide position.
-    #[arg(short = 'd', long = "change-darkness")]
+    #[arg(short = 'd', long = "change-darkness", help_heading = "Gradient Mode")]
     change_darkness: bool,
 
     /// Use the longest path length to change the color darkness.
-    #[arg(short = 'l', long = "longest-path")]
+    #[arg(short = 'l', long = "longest-path", help_heading = "Gradient Mode")]
     longest_path: bool,
 
     /// Change the color darkness from white to black.
-    #[arg(short = 'u', long = "white-to-black")]
+    #[arg(short = 'u', long = "white-to-black", help_heading = "Gradient Mode")]
     white_to_black: bool,
 
-    // Compressed Mode Options
+    // === Special Modes ===
     /// Compress the view vertically, summarizing path coverage.
-    #[arg(short = 'O', long = "compressed-mode")]
+    #[arg(short = 'O', long = "compressed-mode", help_heading = "Special Modes")]
     compressed_mode: bool,
 
-    // Threading
+    /// Apply alignment related visual motifs to paths which have this name prefix.
+    #[arg(short = 'A', long = "alignment-prefix", value_name = "STRING", help_heading = "Special Modes")]
+    alignment_prefix: Option<String>,
+
+    // === Performance ===
     /// Number of threads to use for parallel operations.
-    #[arg(short = 't', long = "threads", value_name = "N")]
+    #[arg(short = 't', long = "threads", value_name = "N", help_heading = "Performance")]
     threads: Option<usize>,
 
-    // Logging
     /// Verbosity level (0 = error, 1 = info, 2 = debug).
-    #[arg(short = 'v', long = "verbose", value_name = "N", default_value_t = 1)]
+    #[arg(short = 'v', long = "verbose", value_name = "N", default_value_t = 1, help_heading = "Performance")]
     verbose: u8,
 }
 
