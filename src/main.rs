@@ -1081,7 +1081,7 @@ fn cluster_paths_by_similarity(
         .map(|path| {
             let mut counts: FxHashMap<u64, u64> = FxHashMap::default();
             for step in &path.steps {
-                let seg_len = segment_lengths.get(step.segment_id as usize - 1).copied().unwrap_or(0);
+                let seg_len = segment_lengths.get(step.segment_id as usize).copied().unwrap_or(0);
                 *counts.entry(step.segment_id).or_insert(0) += seg_len;
             }
             counts
@@ -1131,18 +1131,21 @@ fn cluster_paths_by_similarity(
         })
         .collect();
 
-    // Compute filtered total bp for each path (only from nodes_to_use)
-    let filtered_total_bp: Vec<u64> = filtered_bp_counts
-        .iter()
-        .map(|counts| counts.values().sum())
-        .collect();
+    // Compute total bp for each path
+    // When using all nodes, use full path lengths (matching odgi)
+    // When using variable nodes only, use filtered lengths (consistent intersection/denominator)
+    let total_bp: Vec<u64> = if use_all_nodes {
+        path_bp_counts.iter().map(|counts| counts.values().sum()).collect()
+    } else {
+        filtered_bp_counts.iter().map(|counts| counts.values().sum()).collect()
+    };
 
     // Build full pairwise EDR matrix (matching cosigt: uses normalized EDR)
     debug!("Computing {}x{} pairwise EDR matrix", n, n);
 
     // Compute upper triangle in parallel: EDR for each pair
     let filtered_bp_counts_ref = &filtered_bp_counts;
-    let filtered_total_bp_ref = &filtered_total_bp;
+    let total_bp_ref = &total_bp;
     let pairs: Vec<(usize, usize, f64)> = (0..n)
         .into_par_iter()
         .flat_map(|i| {
@@ -1151,8 +1154,8 @@ fn cluster_paths_by_similarity(
                     let jaccard = weighted_jaccard_similarity(
                         &filtered_bp_counts_ref[i],
                         &filtered_bp_counts_ref[j],
-                        filtered_total_bp_ref[i],
-                        filtered_total_bp_ref[j],
+                        total_bp_ref[i],
+                        total_bp_ref[j],
                     );
                     let edr = jaccard_to_edr(jaccard);
                     (i, j, edr)
@@ -1167,7 +1170,15 @@ fn cluster_paths_by_similarity(
 
     // Debug: print first few EDR values for comparison with odgi
     for (i, j, edr) in pairs.iter().take(5) {
-        debug!("EDR: {} vs {} = {:.6}", paths[*i].name, paths[*j].name, edr);
+        let jaccard = weighted_jaccard_similarity(
+            &filtered_bp_counts[*i],
+            &filtered_bp_counts[*j],
+            total_bp[*i],
+            total_bp[*j],
+        );
+        debug!("EDR: {} vs {} = {:.6} (jaccard={:.6}, bp_a={}, bp_b={})",
+               paths[*i].name, paths[*j].name, edr, jaccard,
+               total_bp[*i], total_bp[*j]);
     }
 
     // Build normalized distance matrix (like cosigt: normRegularMatrix <- regularMatrix / maxD)
@@ -1241,7 +1252,7 @@ fn cluster_paths_by_similarity(
             let start = members
                 .iter()
                 .enumerate()
-                .max_by_key(|&(_, &idx)| filtered_total_bp[idx])
+                .max_by_key(|&(_, &idx)| total_bp[idx])
                 .map(|(local_idx, _)| local_idx)
                 .unwrap();
 
