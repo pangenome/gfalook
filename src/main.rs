@@ -62,6 +62,24 @@ struct Args {
     #[arg(short = 'K', long = "cluster-representatives", requires = "cluster_paths", help_heading = "Clustering")]
     cluster_representatives: bool,
 
+    /// Show dendrogram on the left (hierarchical clustering tree).
+    #[arg(short = 'D', long = "dendrogram", requires = "cluster_paths", help_heading = "Clustering")]
+    dendrogram: bool,
+
+    /// Width of the dendrogram in pixels.
+    #[arg(long = "dendrogram-width", value_name = "PIXELS", default_value = "100", requires = "dendrogram", help_heading = "Clustering")]
+    dendrogram_width: u32,
+
+    /// Use pure UPGMA hierarchical clustering instead of DBSCAN.
+    /// Clusters are determined by cutting the tree at a height threshold.
+    #[arg(long = "use-upgma", requires = "cluster_paths", help_heading = "Clustering")]
+    use_upgma: bool,
+
+    /// Height threshold for cutting UPGMA tree (0.0-1.0, default: auto-detect).
+    /// Lower values create more clusters, higher values create fewer.
+    #[arg(long = "upgma-threshold", value_name = "THRESHOLD", requires = "use_upgma", help_heading = "Clustering")]
+    upgma_threshold: Option<f64>,
+
     // === Path Selection ===
     /// List of paths to display in the specified order.
     #[arg(short = 'p', long = "paths-to-display", value_name = "FILE", help_heading = "Path Selection")]
@@ -872,6 +890,256 @@ struct ClusteringResult {
     num_clusters: usize,
     representatives: Vec<usize>,  // medoid index (into original paths array) per cluster
     cluster_sizes: Vec<usize>,    // member count per cluster
+    dendrogram: Option<Dendrogram>,  // hierarchical clustering tree
+}
+
+/// A node in the dendrogram tree
+#[derive(Clone, Debug)]
+struct DendrogramNode {
+    left: usize,      // index of left child (< n means leaf, >= n means internal node)
+    right: usize,     // index of right child
+    height: f64,      // merge height (distance at which clusters merged)
+    size: usize,      // number of leaves in this subtree
+}
+
+/// Dendrogram structure for hierarchical clustering visualization
+#[derive(Clone, Debug)]
+struct Dendrogram {
+    nodes: Vec<DendrogramNode>,  // internal nodes (n-1 nodes for n leaves)
+    leaf_order: Vec<usize>,      // optimal leaf ordering for visualization
+    max_height: f64,             // maximum merge height
+}
+
+/// Build a dendrogram using UPGMA (Unweighted Pair Group Method with Arithmetic Mean)
+/// cluster_assignments: DBSCAN cluster IDs for each path (used to constrain merging order)
+/// If provided, merging happens within clusters first, then between clusters
+fn build_dendrogram(dist_matrix: &[Vec<f64>], cluster_assignments: Option<&[usize]>) -> Dendrogram {
+    let n = dist_matrix.len();
+    if n == 0 {
+        return Dendrogram {
+            nodes: Vec::new(),
+            leaf_order: Vec::new(),
+            max_height: 0.0,
+        };
+    }
+    if n == 1 {
+        return Dendrogram {
+            nodes: Vec::new(),
+            leaf_order: vec![0],
+            max_height: 0.0,
+        };
+    }
+
+    // Working distance matrix (will be modified during clustering)
+    let mut dists: Vec<Vec<f64>> = dist_matrix.to_vec();
+
+    // Track which cluster each index belongs to (-1 means merged)
+    // Cluster IDs: 0..n are leaves, n..2n-1 are internal nodes
+    let mut cluster_id: Vec<isize> = (0..n as isize).collect();
+    let mut cluster_sizes: Vec<usize> = vec![1; n];
+
+    // Track DBSCAN cluster for each active node (for constrained merging)
+    let dbscan_cluster: Vec<Option<usize>> = if let Some(assignments) = cluster_assignments {
+        assignments.iter().map(|&c| Some(c)).collect()
+    } else {
+        vec![None; n]
+    };
+
+    let mut nodes: Vec<DendrogramNode> = Vec::with_capacity(n - 1);
+    let mut max_height: f64 = 0.0;
+
+    // Track children (leaf indices) for each cluster ID
+    // Key: cluster_id (0..n for leaves, n..2n-1 for internal nodes)
+    // Value: list of original leaf indices in this cluster
+    let mut children: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+    for i in 0..n {
+        children.insert(i, vec![i]);
+    }
+
+    for merge_idx in 0..(n - 1) {
+        // Find minimum distance pair
+        // If cluster_assignments provided, prefer merging within same DBSCAN cluster first
+        let mut min_dist = f64::MAX;
+        let mut min_i = 0;
+        let mut min_j = 0;
+        let mut found_same_cluster = false;
+
+        // First pass: look for merges within same DBSCAN cluster
+        if cluster_assignments.is_some() {
+            for i in 0..n {
+                if cluster_id[i] < 0 { continue; }
+                for j in (i + 1)..n {
+                    if cluster_id[j] < 0 { continue; }
+                    // Only consider if both are in the same DBSCAN cluster
+                    if dbscan_cluster[i] == dbscan_cluster[j] {
+                        if dists[i][j] < min_dist {
+                            min_dist = dists[i][j];
+                            min_i = i;
+                            min_j = j;
+                            found_same_cluster = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Second pass: if no same-cluster merge found, allow any merge
+        if !found_same_cluster {
+            min_dist = f64::MAX;
+            for i in 0..n {
+                if cluster_id[i] < 0 { continue; }
+                for j in (i + 1)..n {
+                    if cluster_id[j] < 0 { continue; }
+                    if dists[i][j] < min_dist {
+                        min_dist = dists[i][j];
+                        min_i = i;
+                        min_j = j;
+                    }
+                }
+            }
+        }
+
+        let new_cluster_id = (n + merge_idx) as isize;
+        let left_id = cluster_id[min_i] as usize;
+        let right_id = cluster_id[min_j] as usize;
+        let left_size = cluster_sizes[min_i];
+        let right_size = cluster_sizes[min_j];
+        let new_size = left_size + right_size;
+
+        // Record the merge
+        nodes.push(DendrogramNode {
+            left: left_id,
+            right: right_id,
+            height: min_dist / 2.0,  // UPGMA uses half the distance as height
+            size: new_size,
+        });
+        max_height = max_height.max(min_dist / 2.0);
+
+        // Merge children lists for leaf ordering
+        // Get children of left and right clusters by their cluster IDs
+        let left_children = children.get(&left_id).cloned().unwrap_or_default();
+        let right_children = children.get(&right_id).cloned().unwrap_or_default();
+        let mut new_children = left_children;
+        new_children.extend(right_children);
+        children.insert(new_cluster_id as usize, new_children);
+
+        // Update distances using UPGMA formula
+        for k in 0..n {
+            if k == min_i || k == min_j || cluster_id[k] < 0 { continue; }
+            let new_dist = (dists[min_i][k] * left_size as f64
+                         + dists[min_j][k] * right_size as f64) / new_size as f64;
+            dists[min_i][k] = new_dist;
+            dists[k][min_i] = new_dist;
+        }
+
+        // Mark min_j as merged into min_i
+        cluster_id[min_j] = -1;
+        cluster_id[min_i] = new_cluster_id;
+        cluster_sizes[min_i] = new_size;
+    }
+
+    // Get leaf order from the root (the last cluster ID created)
+    let root_cluster_id = (2 * n - 2) as usize;
+    let leaf_order = children.get(&root_cluster_id).cloned().unwrap_or_default();
+
+    Dendrogram {
+        nodes,
+        leaf_order,
+        max_height,
+    }
+}
+
+/// Cut the dendrogram tree at a given height threshold and return cluster assignments.
+/// Returns a vector where cluster_ids[i] is the cluster ID for leaf i.
+fn cut_dendrogram_at_height(dendrogram: &Dendrogram, threshold: f64) -> Vec<usize> {
+    let n_leaves = dendrogram.leaf_order.len();
+    if n_leaves == 0 {
+        return Vec::new();
+    }
+    if dendrogram.nodes.is_empty() {
+        // Single leaf - one cluster
+        return vec![0];
+    }
+
+    // Use Union-Find to track which leaves belong to which cluster
+    let mut uf = UnionFind::new(n_leaves);
+
+    // Process merges in order (they're already sorted by height due to UPGMA)
+    for node in &dendrogram.nodes {
+        if node.height <= threshold {
+            // This merge happens below the threshold, so merge the clusters
+            // Need to find representative leaves from left and right subtrees
+            let left_leaf = find_leftmost_leaf(dendrogram, node.left, n_leaves);
+            let right_leaf = find_leftmost_leaf(dendrogram, node.right, n_leaves);
+            uf.union(left_leaf, right_leaf);
+        }
+        // If height > threshold, don't merge - these become separate clusters
+    }
+
+    // Assign consecutive cluster IDs
+    let mut root_to_cluster: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut cluster_ids = Vec::with_capacity(n_leaves);
+    let mut next_cluster = 0;
+
+    for i in 0..n_leaves {
+        let root = uf.find(i);
+        let cluster = *root_to_cluster.entry(root).or_insert_with(|| {
+            let c = next_cluster;
+            next_cluster += 1;
+            c
+        });
+        cluster_ids.push(cluster);
+    }
+
+    cluster_ids
+}
+
+/// Find the leftmost (smallest index) leaf in a subtree
+fn find_leftmost_leaf(dendrogram: &Dendrogram, node_idx: usize, n_leaves: usize) -> usize {
+    if node_idx < n_leaves {
+        return node_idx;
+    }
+    let internal_idx = node_idx - n_leaves;
+    if internal_idx >= dendrogram.nodes.len() {
+        return 0;
+    }
+    // Recursively find leftmost leaf in left subtree
+    find_leftmost_leaf(dendrogram, dendrogram.nodes[internal_idx].left, n_leaves)
+}
+
+/// Find optimal threshold for UPGMA tree cutting using the "elbow" method.
+/// Looks for the largest gap in merge heights.
+fn find_optimal_upgma_threshold(dendrogram: &Dendrogram, max_clusters: Option<usize>) -> f64 {
+    if dendrogram.nodes.is_empty() {
+        return 0.5;
+    }
+
+    let n_leaves = dendrogram.leaf_order.len();
+    let max_clusters = max_clusters.unwrap_or_else(|| (n_leaves + 8) / 9); // ~11% like DBSCAN
+
+    // Collect all merge heights
+    let mut heights: Vec<f64> = dendrogram.nodes.iter().map(|n| n.height).collect();
+    heights.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // Find threshold that gives approximately max_clusters clusters
+    // Start from highest threshold (fewer clusters) and work down
+    for i in (0..heights.len()).rev() {
+        let threshold = heights[i];
+        let clusters = cut_dendrogram_at_height(dendrogram, threshold);
+        let num_clusters = clusters.iter().max().map(|&m| m + 1).unwrap_or(1);
+
+        if num_clusters >= max_clusters {
+            // Found a good threshold
+            debug!("UPGMA auto-threshold: {:.4} gives {} clusters (target: {})",
+                   threshold, num_clusters, max_clusters);
+            return threshold;
+        }
+    }
+
+    // If we couldn't find a good threshold, use the smallest height
+    let threshold = heights.first().copied().unwrap_or(0.0);
+    debug!("UPGMA using minimum threshold: {:.4}", threshold);
+    threshold
 }
 
 /// Union-Find data structure for DBSCAN clustering
@@ -1065,14 +1333,19 @@ fn jaccard_to_edr(jaccard: f64) -> f64 {
     (1.0 - jaccard) / (1.0 + jaccard)
 }
 
-/// Cluster paths by EDR (estimated difference rate) using DBSCAN (matching cosigt exactly)
+/// Cluster paths by EDR (estimated difference rate)
 /// Uses base-pair weighted Jaccard similarity like odgi similarity
+/// If use_upgma is true, uses pure UPGMA hierarchical clustering with tree cutting
+/// Otherwise uses DBSCAN (matching cosigt exactly)
 fn cluster_paths_by_similarity(
     paths: &[&GfaPath],
     segment_lengths: &[u64],  // segment_id -> length (0-indexed by segment_id - 1)
     threshold: Option<f64>,
     use_all_nodes: bool,
     max_clusters: Option<usize>,
+    compute_dendrogram: bool,
+    use_upgma: bool,
+    upgma_threshold: Option<f64>,
 ) -> ClusteringResult {
     if paths.is_empty() {
         return ClusteringResult {
@@ -1081,6 +1354,7 @@ fn cluster_paths_by_similarity(
             num_clusters: 0,
             representatives: Vec::new(),
             cluster_sizes: Vec::new(),
+            dendrogram: None,
         };
     }
 
@@ -1219,25 +1493,52 @@ fn cluster_paths_by_similarity(
         }
     }
 
-    // Find optimal eps (or convert user threshold to eps)
-    let eps = match threshold {
-        Some(t) => {
-            let e = 1.0 - t; // Convert similarity threshold to distance eps
-            debug!("Using user-specified threshold {:.2} (eps = {:.2})", t, e);
-            e
-        }
-        None => find_optimal_eps(&dist_matrix, n, max_clusters),
-    };
-    debug!("DBSCAN eps: {:.2}", eps);
+    // Get cluster assignments using either UPGMA or DBSCAN
+    let (cluster_assignments, dendrogram_for_upgma): (Vec<usize>, Option<Dendrogram>) = if use_upgma {
+        // Pure UPGMA mode: build dendrogram first, then cut at threshold
+        debug!("Using UPGMA hierarchical clustering");
+        let dg = build_dendrogram(&dist_matrix, None); // No DBSCAN constraint for pure UPGMA
 
-    // Run DBSCAN to get cluster assignments
-    let dbscan_clusters = dbscan_cluster(&dist_matrix, eps);
-    let num_clusters = dbscan_clusters.iter().max().map(|&m| m + 1).unwrap_or(1);
-    debug!("DBSCAN detected {} clusters", num_clusters);
+        // Determine cut threshold
+        let cut_threshold = match upgma_threshold {
+            Some(t) => {
+                debug!("Using user-specified UPGMA threshold: {:.4}", t);
+                t * dg.max_height // Scale to actual height range
+            }
+            None => find_optimal_upgma_threshold(&dg, max_clusters),
+        };
+
+        let clusters = cut_dendrogram_at_height(&dg, cut_threshold);
+        let num_clusters = clusters.iter().max().map(|&m| m + 1).unwrap_or(1);
+        debug!("UPGMA cut at height {:.4} gives {} clusters", cut_threshold, num_clusters);
+
+        (clusters, Some(dg))
+    } else {
+        // DBSCAN mode (original behavior)
+        // Find optimal eps (or convert user threshold to eps)
+        let eps = match threshold {
+            Some(t) => {
+                let e = 1.0 - t; // Convert similarity threshold to distance eps
+                debug!("Using user-specified threshold {:.2} (eps = {:.2})", t, e);
+                e
+            }
+            None => find_optimal_eps(&dist_matrix, n, max_clusters),
+        };
+        debug!("DBSCAN eps: {:.2}", eps);
+
+        // Run DBSCAN to get cluster assignments
+        let clusters = dbscan_cluster(&dist_matrix, eps);
+        let num_clusters = clusters.iter().max().map(|&m| m + 1).unwrap_or(1);
+        debug!("DBSCAN detected {} clusters", num_clusters);
+
+        (clusters, None)
+    };
+
+    let num_clusters = cluster_assignments.iter().max().map(|&m| m + 1).unwrap_or(1);
 
     // Group paths by cluster
     let mut cluster_members: Vec<Vec<usize>> = vec![Vec::new(); num_clusters];
-    for (i, &cluster) in dbscan_clusters.iter().enumerate() {
+    for (i, &cluster) in cluster_assignments.iter().enumerate() {
         cluster_members[cluster].push(i);
     }
 
@@ -1335,12 +1636,40 @@ fn cluster_paths_by_similarity(
 
     debug!("Final ordering: {} paths in {} clusters", ordering.len(), num_clusters);
 
+    // Build or reuse dendrogram
+    let dendrogram = if use_upgma {
+        // For UPGMA mode, we already have the dendrogram
+        dendrogram_for_upgma
+    } else if compute_dendrogram {
+        // For DBSCAN mode, build dendrogram constrained by clusters
+        Some(build_dendrogram(&dist_matrix, Some(&cluster_assignments)))
+    } else {
+        None
+    };
+
+    // If dendrogram is available, use its leaf order for visualization
+    let (final_ordering, final_cluster_ids) = if let Some(ref dg) = dendrogram {
+        // Map dendrogram leaf order to cluster IDs
+        let mut dg_ordering = Vec::with_capacity(n);
+        let mut dg_cluster_ids = Vec::with_capacity(n);
+
+        for &orig_idx in &dg.leaf_order {
+            dg_ordering.push(orig_idx);
+            // Find cluster ID for this path from cluster assignments
+            dg_cluster_ids.push(cluster_assignments[orig_idx]);
+        }
+        (dg_ordering, dg_cluster_ids)
+    } else {
+        (ordering, final_cluster_ids)
+    };
+
     ClusteringResult {
-        ordering,
+        ordering: final_ordering,
         cluster_ids: final_cluster_ids,
         num_clusters,
         representatives,
         cluster_sizes,
+        dendrogram,
     }
 }
 
@@ -1351,6 +1680,263 @@ struct BinInfo {
     mean_pos: f64,       // mean position within path (for darkness gradient)
     mean_uncalled: f64,  // proportion of uncalled bases (N's) in bin
     highlighted: bool,   // whether this bin contains highlighted nodes
+}
+
+/// Draw a line on the buffer (Bresenham's algorithm)
+fn draw_line(buffer: &mut [u8], width: u32, x0: i32, y0: i32, x1: i32, y1: i32, r: u8, g: u8, b: u8) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+
+    loop {
+        if x >= 0 && y >= 0 {
+            let idx = ((y as u32 * width + x as u32) * 4) as usize;
+            if idx + 3 < buffer.len() {
+                buffer[idx] = r;
+                buffer[idx + 1] = g;
+                buffer[idx + 2] = b;
+                buffer[idx + 3] = 255;
+            }
+        }
+        if x == x1 && y == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// Render dendrogram recursively, returning the Y coordinate of the node's connection point
+fn render_dendrogram_node(
+    buffer: &mut [u8],
+    width: u32,
+    dendrogram: &Dendrogram,
+    node_idx: usize,
+    n_leaves: usize,
+    x_offset: u32,
+    dendro_width: u32,
+    pix_per_path: u32,
+    leaf_y_positions: &[u32],
+) -> (u32, f64) {
+    // Returns (y_position, height)
+    if node_idx < n_leaves {
+        // Leaf node - return its Y position (center of the path row)
+        let y = leaf_y_positions[node_idx] + pix_per_path / 2;
+        return (y, 0.0);
+    }
+
+    let internal_idx = node_idx - n_leaves;
+    if internal_idx >= dendrogram.nodes.len() {
+        // Safety check: invalid node index
+        return (0, 0.0);
+    }
+    let node = &dendrogram.nodes[internal_idx];
+
+    // Recursively get positions of children
+    let (left_y, _left_h) = render_dendrogram_node(
+        buffer, width, dendrogram, node.left, n_leaves,
+        x_offset, dendro_width, pix_per_path, leaf_y_positions
+    );
+    let (right_y, _right_h) = render_dendrogram_node(
+        buffer, width, dendrogram, node.right, n_leaves,
+        x_offset, dendro_width, pix_per_path, leaf_y_positions
+    );
+
+    // Calculate X position based on merge height
+    // X goes from right (leaves at dendro_width) to left (root at 0)
+    let x = if dendrogram.max_height > 0.0 {
+        x_offset + ((1.0 - node.height / dendrogram.max_height) * (dendro_width - 5) as f64) as u32
+    } else {
+        x_offset + dendro_width / 2
+    };
+
+    // Draw horizontal lines from children to this node's X
+    let left_x = if node.left < n_leaves {
+        x_offset + dendro_width - 2  // Leaves are at the right edge
+    } else {
+        let left_internal = node.left - n_leaves;
+        if left_internal < dendrogram.nodes.len() {
+            let left_node = &dendrogram.nodes[left_internal];
+            x_offset + ((1.0 - left_node.height / dendrogram.max_height) * (dendro_width - 5) as f64) as u32
+        } else {
+            x_offset + dendro_width / 2
+        }
+    };
+    let right_x = if node.right < n_leaves {
+        x_offset + dendro_width - 2
+    } else {
+        let right_internal = node.right - n_leaves;
+        if right_internal < dendrogram.nodes.len() {
+            let right_node = &dendrogram.nodes[right_internal];
+            x_offset + ((1.0 - right_node.height / dendrogram.max_height) * (dendro_width - 5) as f64) as u32
+        } else {
+            x_offset + dendro_width / 2
+        }
+    };
+
+    // Draw lines (dark grey color)
+    let line_color = (80u8, 80u8, 80u8);
+
+    // Horizontal line from left child to this X
+    draw_line(buffer, width, left_x as i32, left_y as i32, x as i32, left_y as i32,
+              line_color.0, line_color.1, line_color.2);
+    // Horizontal line from right child to this X
+    draw_line(buffer, width, right_x as i32, right_y as i32, x as i32, right_y as i32,
+              line_color.0, line_color.1, line_color.2);
+    // Vertical line connecting the two horizontal lines
+    draw_line(buffer, width, x as i32, left_y as i32, x as i32, right_y as i32,
+              line_color.0, line_color.1, line_color.2);
+
+    // Return the midpoint Y
+    let mid_y = (left_y + right_y) / 2;
+    (mid_y, node.height)
+}
+
+/// Render the full dendrogram for PNG output
+/// leaf_y_positions: pre-computed Y positions for each leaf (indexed by original path index)
+fn render_dendrogram_png(
+    buffer: &mut [u8],
+    width: u32,
+    dendrogram: &Dendrogram,
+    dendro_width: u32,
+    pix_per_path: u32,
+    leaf_y_positions: &[u32],
+) {
+    if dendrogram.nodes.is_empty() || dendrogram.leaf_order.len() <= 1 {
+        return;
+    }
+
+    // Number of leaves from the dendrogram
+    let n_leaves = dendrogram.leaf_order.len();
+
+
+    // Root is the last internal node
+    let root_idx = n_leaves + dendrogram.nodes.len() - 1;
+
+    render_dendrogram_node(
+        buffer, width, dendrogram, root_idx, n_leaves,
+        0, dendro_width, pix_per_path, leaf_y_positions
+    );
+}
+
+/// Render dendrogram node recursively for SVG, returning Y position and collecting path elements
+fn render_dendrogram_node_svg(
+    dendrogram: &Dendrogram,
+    node_idx: usize,
+    n_leaves: usize,
+    x_offset: f64,
+    dendro_width: f64,
+    pix_per_path: f64,
+    leaf_y_positions: &[f64],
+    paths: &mut Vec<String>,
+) -> (f64, f64) {
+    // Returns (y_position, height)
+    if node_idx < n_leaves {
+        // Leaf node - return its Y position (center of the path row)
+        let y = leaf_y_positions[node_idx] + pix_per_path / 2.0;
+        return (y, 0.0);
+    }
+
+    let internal_idx = node_idx - n_leaves;
+    if internal_idx >= dendrogram.nodes.len() {
+        return (0.0, 0.0);
+    }
+    let node = &dendrogram.nodes[internal_idx];
+
+    // Recursively get positions of children
+    let (left_y, _) = render_dendrogram_node_svg(
+        dendrogram, node.left, n_leaves,
+        x_offset, dendro_width, pix_per_path, leaf_y_positions, paths
+    );
+    let (right_y, _) = render_dendrogram_node_svg(
+        dendrogram, node.right, n_leaves,
+        x_offset, dendro_width, pix_per_path, leaf_y_positions, paths
+    );
+
+    // Calculate X position based on merge height
+    let x = if dendrogram.max_height > 0.0 {
+        x_offset + (1.0 - node.height / dendrogram.max_height) * (dendro_width - 5.0)
+    } else {
+        x_offset + dendro_width / 2.0
+    };
+
+    // Calculate child X positions
+    let left_x = if node.left < n_leaves {
+        x_offset + dendro_width - 2.0
+    } else {
+        let left_internal = node.left - n_leaves;
+        if left_internal < dendrogram.nodes.len() {
+            let left_node = &dendrogram.nodes[left_internal];
+            x_offset + (1.0 - left_node.height / dendrogram.max_height) * (dendro_width - 5.0)
+        } else {
+            x_offset + dendro_width / 2.0
+        }
+    };
+    let right_x = if node.right < n_leaves {
+        x_offset + dendro_width - 2.0
+    } else {
+        let right_internal = node.right - n_leaves;
+        if right_internal < dendrogram.nodes.len() {
+            let right_node = &dendrogram.nodes[right_internal];
+            x_offset + (1.0 - right_node.height / dendrogram.max_height) * (dendro_width - 5.0)
+        } else {
+            x_offset + dendro_width / 2.0
+        }
+    };
+
+    // Add SVG path elements for the lines
+    let line_color = "#505050";
+    // Horizontal line from left child to this X
+    paths.push(format!(
+        r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="1"/>"#,
+        left_x, left_y, x, left_y, line_color
+    ));
+    // Horizontal line from right child to this X
+    paths.push(format!(
+        r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="1"/>"#,
+        right_x, right_y, x, right_y, line_color
+    ));
+    // Vertical line connecting the two horizontal lines
+    paths.push(format!(
+        r#"<line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="{}" stroke-width="1"/>"#,
+        x, left_y, x, right_y, line_color
+    ));
+
+    let mid_y = (left_y + right_y) / 2.0;
+    (mid_y, node.height)
+}
+
+/// Render the full dendrogram for SVG output, returns SVG elements as string
+/// leaf_y_positions: pre-computed Y positions for each leaf (indexed by original path index)
+fn render_dendrogram_svg(
+    dendrogram: &Dendrogram,
+    dendro_width: f64,
+    pix_per_path: f64,
+    leaf_y_positions: &[f64],
+) -> String {
+    if dendrogram.nodes.is_empty() || dendrogram.leaf_order.len() <= 1 {
+        return String::new();
+    }
+
+    let n_leaves = dendrogram.leaf_order.len();
+    let root_idx = n_leaves + dendrogram.nodes.len() - 1;
+    let mut paths = Vec::new();
+
+    render_dendrogram_node_svg(
+        dendrogram, root_idx, n_leaves,
+        0.0, dendro_width, pix_per_path, leaf_y_positions, &mut paths
+    );
+
+    paths.join("\n")
 }
 
 fn write_char(
@@ -1522,20 +2108,20 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let _scale_x = 1.0; // In binned mode
     let _scale_y = viz_width as f64 / len_to_visualize as f64;
 
-    // Cluster paths by similarity if requested
+    // Cluster paths by similarity if requested (PNG rendering)
     let cluster_result = if args.cluster_paths {
         debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
         let original_paths = display_paths.clone(); // Save for medoids TSV
-        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters);
+        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters, args.dendrogram || args.use_upgma, args.use_upgma, args.upgma_threshold);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
         // Write medoids TSV
         write_medoids_tsv(&args.out, &original_paths, &result);
 
-        // Filter to representatives only if requested
+        // Filter to representatives only if requested (PNG)
         let result = if args.cluster_representatives {
             let rep_set: FxHashSet<usize> = result.representatives.iter().copied().collect();
             let mut filtered_paths = Vec::new();
@@ -1553,6 +2139,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 num_clusters: result.num_clusters,
                 representatives: result.representatives,
                 cluster_sizes: result.cluster_sizes,
+                dendrogram: result.dendrogram,
             }
         } else {
             result
@@ -1562,7 +2149,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         None
     };
 
-    // Recalculate path_count after potential filtering by cluster_representatives
+    // Recalculate path_count after potential filtering by cluster_representatives (PNG)
     let path_count = display_paths.len() as u32;
 
     // Calculate total gap space needed for cluster separators
@@ -1619,6 +2206,13 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     // Cluster bar width (only if clustering is enabled)
     let cluster_bar_width: u32 = if cluster_result.is_some() { 10 } else { 0 };
 
+    // Dendrogram width (only if dendrogram is enabled and we have a dendrogram)
+    let dendrogram_width: u32 = if args.dendrogram && cluster_result.as_ref().map(|cr| cr.dendrogram.is_some()).unwrap_or(false) {
+        args.dendrogram_width
+    } else {
+        0
+    };
+
     // Disable path names when pack_paths is enabled (they wouldn't make sense)
     let text_only_width = if args.hide_path_names || args.pack_paths {
         0u32
@@ -1628,8 +2222,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         0
     };
 
-    // Total left panel width includes cluster bar + path names
-    let path_names_width = text_only_width + cluster_bar_width;
+    // Total left panel width includes dendrogram + cluster bar + path names
+    let path_names_width = dendrogram_width + text_only_width + cluster_bar_width;
 
     let path_space = effective_row_count * pix_per_path + total_gap;
 
@@ -1665,6 +2259,53 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     } else {
         Vec::new()
     };
+
+    // Pre-compute leaf Y positions for dendrogram (accounting for cluster gaps)
+    let dendrogram_leaf_y_positions: Vec<u32> = if dendrogram_width > 0 {
+        if let Some(ref cr) = cluster_result {
+            if let Some(ref dg) = cr.dendrogram {
+                let n_leaves = dg.leaf_order.len();
+                let mut positions = vec![0u32; n_leaves];
+                let mut cumulative_gap: u32 = 0;
+                let mut prev_cluster_id: Option<usize> = None;
+
+                for (display_pos, &orig_idx) in dg.leaf_order.iter().enumerate() {
+                    if orig_idx < n_leaves && display_pos < cr.cluster_ids.len() {
+                        // cluster_ids is indexed by display position, not original index
+                        let cluster_id = cr.cluster_ids[display_pos];
+                        if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+                            cumulative_gap += args.cluster_gap;
+                        }
+                        prev_cluster_id = Some(cluster_id);
+                        positions[orig_idx] = display_pos as u32 * pix_per_path + cumulative_gap;
+                    }
+                }
+                positions
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    // Render dendrogram if enabled (PNG)
+    if dendrogram_width > 0 && !dendrogram_leaf_y_positions.is_empty() {
+        if let Some(ref cr) = cluster_result {
+            if let Some(ref dg) = cr.dendrogram {
+                render_dendrogram_png(
+                    &mut path_names_buffer,
+                    path_names_width,
+                    dg,
+                    dendrogram_width,
+                    pix_per_path,
+                    &dendrogram_leaf_y_positions,
+                );
+            }
+        }
+    }
 
     // Track maximum y coordinate used (for cropping)
     let mut max_y: u32 = path_space + max_axis_height;
@@ -1743,14 +2384,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             let base_y = y_start + pix_per_path / 2 - char_size / 2;
             for (i, c) in display_name.chars().take(num_of_chars).enumerate() {
-                let base_x = (left_padding + i) as u32 * char_size + 3 + cluster_bar_width;
+                let base_x = (left_padding + i) as u32 * char_size + 3 + dendrogram_width + cluster_bar_width;
                 let c_byte = c as usize;
                 let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
                 write_char(&mut path_names_buffer, path_names_width, base_x, base_y, char_data, char_size, 0, 0, 0);
             }
         }
 
-        // Render aggregated bins
+        // Render aggregated bins (PNG compressed mode)
         for (bin_idx, mean_depth) in &compressed_bins {
             let x = (*bin_idx as u32).min(viz_width - 1);
             let (r, g, b) = get_depth_color(*mean_depth, args.no_grey_depth, Some(compressed_palette));
@@ -2019,7 +2660,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             if let Some(ref cr) = cluster_result {
                 let cluster_id = cr.cluster_ids[path_idx];
                 let (cr_r, cr_g, cr_b) = get_cluster_color(cluster_id);
-                for x in 0..cluster_bar_width {
+                for x in dendrogram_width..(dendrogram_width + cluster_bar_width) {
                     add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
                         cr_r, cr_g, cr_b, true, false); // no border for cluster bar
                 }
@@ -2033,14 +2674,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             compute_path_color(&path.name, args.color_by_prefix)
         };
 
-        // Render path name (only once per group)
+        // Render path name (only once per group) - PNG normal paths
         if is_first_in_group && text_only_width > 0 && pix_per_path >= 8 {
             let num_of_chars = display_name.len().min(max_num_of_chars);
             let path_name_too_long = display_name.len() > num_of_chars;
             let left_padding = max_num_of_chars - num_of_chars;
 
             if args.color_path_names_background {
-                for x in (left_padding as u32 * char_size + cluster_bar_width)..path_names_width {
+                for x in (left_padding as u32 * char_size + dendrogram_width + cluster_bar_width)..path_names_width {
                     add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
                         path_r, path_g, path_b, args.no_path_borders, args.black_path_borders);
                 }
@@ -2048,8 +2689,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             let base_y = y_start + pix_per_path / 2 - char_size / 2;
             for (i, c) in display_name.chars().take(num_of_chars).enumerate() {
-                // +3 offset to match odgi's text positioning, shifted by cluster_bar_width
-                let base_x = (left_padding + i) as u32 * char_size + 3 + cluster_bar_width;
+                // +3 offset to match odgi's text positioning, shifted by dendrogram + cluster_bar
+                let base_x = (left_padding + i) as u32 * char_size + 3 + dendrogram_width + cluster_bar_width;
                 let char_data = if i == num_of_chars - 1 && path_name_too_long {
                     &TRAILING_DOTS
                 } else {
@@ -2274,8 +2915,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             let left_padding = max_label_chars.saturating_sub(display_label.len());
 
             for (i, c) in display_label.chars().enumerate() {
-                // +3 offset to match path name positioning
-                let char_x = (left_padding + i) as u32 * char_size + 3 + cluster_bar_width;
+                // +3 offset to match path name positioning, shifted by dendrogram + cluster_bar
+                let char_x = (left_padding + i) as u32 * char_size + 3 + dendrogram_width + cluster_bar_width;
                 let c_byte = c as usize;
                 let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
                 // Draw twice with 1-pixel offset for bold effect
@@ -2286,7 +2927,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             }
         }
 
-        // Draw horizontal axis line
+        // Draw horizontal axis line (PNG)
         for x in path_names_width..total_width {
             let idx = ((axis_y * total_width + x) * 4) as usize;
             if idx + 3 < buffer.len() {
@@ -2643,20 +3284,20 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
     let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
 
-    // Cluster paths by similarity if requested
+    // Cluster paths by similarity if requested (SVG rendering)
     let cluster_result = if args.cluster_paths {
         debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
         let original_paths = display_paths.clone(); // Save for medoids TSV
-        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters);
+        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters, args.dendrogram || args.use_upgma, args.use_upgma, args.upgma_threshold);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
         // Write medoids TSV
         write_medoids_tsv(&args.out, &original_paths, &result);
 
-        // Filter to representatives only if requested
+        // Filter to representatives only if requested (SVG)
         let result = if args.cluster_representatives {
             let rep_set: FxHashSet<usize> = result.representatives.iter().copied().collect();
             let mut filtered_paths = Vec::new();
@@ -2674,6 +3315,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 num_clusters: result.num_clusters,
                 representatives: result.representatives,
                 cluster_sizes: result.cluster_sizes,
+                dendrogram: result.dendrogram,
             }
         } else {
             result
@@ -2683,7 +3325,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         None
     };
 
-    // Recalculate path_count after potential filtering by cluster_representatives
+    // Recalculate path_count after potential filtering by cluster_representatives (SVG)
     let path_count = display_paths.len() as u32;
 
     // Load prefix grouping if specified (SVG) - must be after clustering check
@@ -2735,13 +3377,20 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Cluster bar width (only if clustering is enabled)
     let cluster_bar_width = if cluster_result.is_some() { 10.0 } else { 0.0 };
 
+    // Dendrogram width (only if dendrogram is enabled and we have a dendrogram)
+    let dendrogram_width: f64 = if args.dendrogram && cluster_result.as_ref().map(|cr| cr.dendrogram.is_some()).unwrap_or(false) {
+        args.dendrogram_width as f64
+    } else {
+        0.0
+    };
+
     let path_space = effective_row_count * pix_per_path;
     let bottom_padding = 5u32;
     let height_param = (args.height + bottom_padding) as u64;
     let edge_height = (len_to_visualize.min(height_param)) as u32;
     let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
 
-    let total_width = viz_width as f64 + text_width + cluster_bar_width;
+    let total_width = viz_width as f64 + text_width + cluster_bar_width + dendrogram_width;
     let total_height = path_space + edge_height;
 
     // Load colorbrewer palette if specified (SVG)
@@ -2787,6 +3436,37 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         1
     };
 
+    // Pre-compute leaf Y positions for dendrogram (accounting for cluster gaps) - SVG
+    let dendrogram_leaf_y_positions_svg: Vec<f64> = if dendrogram_width > 0.0 {
+        if let Some(ref cr) = cluster_result {
+            if let Some(ref dg) = cr.dendrogram {
+                let n_leaves = dg.leaf_order.len();
+                let mut positions = vec![0.0f64; n_leaves];
+                let mut cumulative_gap: f64 = 0.0;
+                let mut prev_cluster_id: Option<usize> = None;
+
+                for (display_pos, &orig_idx) in dg.leaf_order.iter().enumerate() {
+                    if orig_idx < n_leaves && display_pos < cr.cluster_ids.len() {
+                        // cluster_ids is indexed by display position, not original index
+                        let cluster_id = cr.cluster_ids[display_pos];
+                        if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+                            cumulative_gap += args.cluster_gap as f64;
+                        }
+                        prev_cluster_id = Some(cluster_id);
+                        positions[orig_idx] = display_pos as f64 * pix_per_path as f64 + cumulative_gap;
+                    }
+                }
+                positions
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
     let mut svg = String::new();
 
     // SVG header
@@ -2800,6 +3480,17 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 "#,
         total_width, total_height, total_width, total_height, font_size
     ));
+
+    // Render dendrogram if enabled (SVG)
+    if dendrogram_width > 0.0 && !dendrogram_leaf_y_positions_svg.is_empty() {
+        if let Some(ref cr) = cluster_result {
+            if let Some(ref dg) = cr.dendrogram {
+                let dendro_svg = render_dendrogram_svg(dg, dendrogram_width, pix_per_path as f64, &dendrogram_leaf_y_positions_svg);
+                svg.push_str(&dendro_svg);
+                svg.push('\n');
+            }
+        }
+    }
 
     // Track max_y for edge rendering
     let mut max_y: f64 = path_space as f64;
@@ -2840,7 +3531,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let text_y = y_start + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="black">{}</text>"#,
-                cluster_bar_width + 5.0, text_y, "COMPRESSED_MODE"
+                dendrogram_width + cluster_bar_width + 5.0, text_y, "COMPRESSED_MODE"
             ));
             svg.push('\n');
         }
@@ -2861,7 +3552,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     // Continue the run
                 } else {
                     // Output the previous run
-                    let x = text_width + cluster_bar_width + run_start as f64;
+                    let x = dendrogram_width + text_width + cluster_bar_width + run_start as f64;
                     let width = (px - run_start + 1) as f64;
                     svg.push_str(&format!(
                         r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -2881,7 +3572,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
         // Output last run
         if let Some(px) = prev_x {
-            let x = text_width + cluster_bar_width + run_start as f64;
+            let x = dendrogram_width + text_width + cluster_bar_width + run_start as f64;
             let width = (px - run_start + 1) as f64;
             svg.push_str(&format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -3052,7 +3743,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                         // Continue run
                     } else {
                         // Output run
-                        let x = text_width + cluster_bar_width + run_start as f64;
+                        let x = dendrogram_width + text_width + cluster_bar_width + run_start as f64;
                         let width = (px - run_start + 1) as f64;
                         svg.push_str(&format!(
                             r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -3070,7 +3761,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
             // Output last run
             if let Some(px) = prev_x {
-                let x = text_width + cluster_bar_width + run_start as f64;
+                let x = dendrogram_width + text_width + cluster_bar_width + run_start as f64;
                 let width = (px - run_start + 1) as f64;
                 svg.push_str(&format!(
                     r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -3137,8 +3828,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 let cluster_id = cr.cluster_ids[path_idx];
                 let (cr, cg, cb) = get_cluster_color(cluster_id);
                 svg.push_str(&format!(
-                    r#"<rect x="0" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                    y_start, cluster_bar_width, pix_per_path, cr, cg, cb
+                    r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                    dendrogram_width, y_start, cluster_bar_width, pix_per_path, cr, cg, cb
                 ));
                 svg.push('\n');
             }
@@ -3158,7 +3849,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 // White text on colored background
                 svg.push_str(&format!(
                     r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                    cluster_bar_width, y_start, text_width, pix_per_path, path_r, path_g, path_b
+                    dendrogram_width + cluster_bar_width, y_start, text_width, pix_per_path, path_r, path_g, path_b
                 ));
                 svg.push('\n');
                 "white"
@@ -3167,7 +3858,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             };
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="{}">{}</text>"#,
-                cluster_bar_width + 5.0, text_y, text_color, escape_xml(&display_name)
+                dendrogram_width + cluster_bar_width + 5.0, text_y, text_color, escape_xml(&display_name)
             ));
             svg.push('\n');
         }
@@ -3322,7 +4013,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     run_end = bin_idx;
                 } else {
                     // Output the previous run
-                    let x = cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
+                    let x = dendrogram_width + cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
                     let width = (run_end - run_start + 1) as f64;
                     svg.push_str(&format!(
                         r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -3338,7 +4029,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
 
             // Output the final run
-            let x = cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
+            let x = dendrogram_width + cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
             let width = (run_end - run_start + 1) as f64;
             svg.push_str(&format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -3353,7 +4044,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let border_color = if args.black_path_borders { "black" } else { "white" };
             svg.push_str(&format!(
                 r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>"#,
-                cluster_bar_width + text_width, border_y, total_width, border_y, border_color
+                dendrogram_width + cluster_bar_width + text_width, border_y, total_width, border_y, border_color
             ));
             svg.push('\n');
         }
@@ -3373,8 +4064,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
                     // If there's a gap between bins, draw a connecting line
                     if curr_bin > prev_bin + 1 {
-                        let x_start = cluster_bar_width + text_width + (prev_bin as f64 + 1.0).min((viz_width - 1) as f64);
-                        let x_end = cluster_bar_width + text_width + (curr_bin as f64).min((viz_width - 1) as f64);
+                        let x_start = dendrogram_width + cluster_bar_width + text_width + (prev_bin as f64 + 1.0).min((viz_width - 1) as f64);
+                        let x_end = dendrogram_width + cluster_bar_width + text_width + (curr_bin as f64).min((viz_width - 1) as f64);
                         let line_width = x_end - x_start;
 
                         if line_width > 0.0 {
@@ -3411,7 +4102,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let axis_y = path_space_with_gap + axis_padding;
 
         // X start and end of the axis line
-        let axis_x_start = cluster_bar_width + text_width;
+        let axis_x_start = dendrogram_width + cluster_bar_width + text_width;
         let axis_x_end = total_width;
 
         // Draw axis label on the left
@@ -3436,7 +4127,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let label_y = axis_y + (axis_total_height / 2.0) + (font_size / 3.0);
         svg.push_str(&format!(
             r#"<text x="{}" y="{}" class="path-name" font-weight="bold" fill="black">{}</text>"#,
-            cluster_bar_width + 5.0,
+            dendrogram_width + cluster_bar_width + 5.0,
             label_y,
             escape_xml(&display_label)
         ));
@@ -3558,8 +4249,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let dist = ((b - a) * bin_width) as f64;
             let h = (dist * scale_y_edges).min(edge_height as f64 - 1.0);
 
-            let ax = cluster_bar_width + text_width + a.round();
-            let bx = cluster_bar_width + text_width + b.round();
+            let ax = dendrogram_width + cluster_bar_width + text_width + a.round();
+            let bx = dendrogram_width + cluster_bar_width + text_width + b.round();
 
             // Skip degenerate edges (zero height and minimal width - not visible)
             if h < 1.0 && (bx - ax).abs() < 2.0 {

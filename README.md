@@ -4,6 +4,12 @@ A Rust tool for visualizing variation graphs from GFA files.
 
 This is a reimplementation of [odgi viz](https://github.com/pangenome/odgi) that works directly with GFA files, avoiding the need to convert to ODGI format first.
 
+## Citation
+
+Based on the `viz` command from [ODGI](https://github.com/pangenome/odgi):
+
+> Guarracino A, Heumos S, Naber F, Panber P, Kelleher J, Garrison E. ODGI: understanding pangenome graphs. *Bioinformatics*. 2022;38(13):3319-3326. https://doi.org/10.1093/bioinformatics/btac308
+
 ## Features
 
 - Direct GFA file input (no conversion required)
@@ -123,6 +129,44 @@ gfalook -i graph.gfa -o clustered_representatives.png -x 1000 -y 500 -k -K -m
 
 ![Cluster representatives](images/clustered_representatives.png)
 
+### Dendrogram visualization (`-k -D`)
+
+Show hierarchical clustering tree alongside paths:
+
+```bash
+gfalook -i graph.gfa -o dendrogram.png -x 1000 -y 500 -k -D -m
+```
+
+![Dendrogram](images/dendrogram.png)
+
+### Dendrogram with depth coloring (`-k -D -m`)
+
+Combine dendrogram with depth coloring for comprehensive visualization:
+
+```bash
+gfalook -i graph.gfa -o dendrogram_depth.png -x 1000 -y 500 -k -D -m --dendrogram-width 120
+```
+
+![Dendrogram with depth](images/dendrogram_depth.png)
+
+### UPGMA hierarchical clustering (`--use-upgma`)
+
+Use pure UPGMA hierarchical clustering instead of DBSCAN. This creates clusters by cutting the tree at a height threshold:
+
+```bash
+gfalook -i graph.gfa -o upgma.png -x 1000 -y 500 -k --use-upgma -D -m
+```
+
+![UPGMA clustering](images/upgma.png)
+
+Control cluster granularity with `--upgma-threshold` (0.0-1.0, lower = more clusters):
+
+```bash
+gfalook -i graph.gfa -o upgma_fine.png -x 1000 -y 500 -k --use-upgma --upgma-threshold 0.3 -D -m
+```
+
+![UPGMA fine clustering](images/upgma_fine.png)
+
 ### X-axis with pangenomic coordinates (`--x-axis pangenomic`)
 
 Display coordinates based on node order in the graph:
@@ -154,12 +198,6 @@ gfalook -i graph.gfa -o xaxis_chm13_abs.png -x 1000 -y 500 \
 ```
 
 ![X-axis absolute](images/xaxis_chm13_abs.png)
-
-## Citation
-
-Based on the `viz` command from [ODGI](https://github.com/pangenome/odgi):
-
-> Guarracino A, Heumos S, Naber F, Panber P, Kelleher J, Garrison E. ODGI: understanding pangenome graphs. *Bioinformatics*. 2022;38(13):3319-3326. https://doi.org/10.1093/bioinformatics/btac308
 
 ## License
 
