@@ -182,6 +182,10 @@ struct Args {
     #[arg(long = "x-ticks", value_name = "N", default_value_t = 10, help_heading = "X-Axis")]
     x_ticks: u32,
 
+    /// Show absolute coordinates by adding the subpath start position (from name:start-end format). Cannot be used with "pangenomic".
+    #[arg(long = "x-axis-absolute", requires = "x_axis", help_heading = "X-Axis")]
+    x_axis_absolute: bool,
+
     // === Performance ===
     /// Number of threads to use for parallel operations.
     #[arg(short = 't', long = "threads", value_name = "N", help_heading = "Performance")]
@@ -1389,8 +1393,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         let axis_y = path_space + axis_padding;
 
         // Draw axis label on the left (in path_names_buffer if available)
+        // Strip the :start-end range from the label when showing absolute coordinates
         let label_text = if coord_system.to_lowercase() == "pangenomic" {
             "pangenomic".to_string()
+        } else if args.x_axis_absolute {
+            strip_subpath_range(coord_system).to_string()
         } else {
             coord_system.clone()
         };
@@ -1434,10 +1441,16 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
         // Calculate tick positions and labels
         let num_ticks = args.x_ticks.max(2) as usize;
+        let is_pangenomic = coord_system.to_lowercase() == "pangenomic";
+
+        // Warn if --x-axis-absolute is used with pangenomic
+        if args.x_axis_absolute && is_pangenomic {
+            debug!("--x-axis-absolute has no effect with pangenomic coordinates");
+        }
 
         // For pangenomic coordinates, use total graph length
         // For path-based coordinates, find the path and use its length
-        let (coord_start, coord_end) = if coord_system.to_lowercase() == "pangenomic" {
+        let (coord_start, coord_end) = if is_pangenomic {
             (0u64, len_to_visualize)
         } else {
             if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
@@ -1451,7 +1464,13 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                         }
                     })
                     .sum();
-                (0u64, path_len)
+                // Add subpath start offset if --x-axis-absolute is enabled
+                let offset = if args.x_axis_absolute {
+                    parse_subpath_start(coord_system)
+                } else {
+                    0
+                };
+                (offset, offset + path_len)
             } else {
                 debug!("Path '{}' not found, using pangenomic coordinates", coord_system);
                 (0u64, len_to_visualize)
@@ -1654,6 +1673,39 @@ fn format_coordinate(value: u64) -> String {
     } else {
         value.to_string()
     }
+}
+
+/// Parse the start position from a path name in "name:start-end" format.
+/// Returns 0 if the format doesn't match.
+fn parse_subpath_start(path_name: &str) -> u64 {
+    // Look for the last colon followed by "number-number"
+    if let Some(colon_pos) = path_name.rfind(':') {
+        let range_part = &path_name[colon_pos + 1..];
+        if let Some(dash_pos) = range_part.find('-') {
+            if let Ok(start) = range_part[..dash_pos].parse::<u64>() {
+                return start;
+            }
+        }
+    }
+    0
+}
+
+/// Strip the ":start-end" range from a path name if present.
+/// Returns the base name without the range.
+fn strip_subpath_range(path_name: &str) -> &str {
+    // Look for the last colon followed by "number-number"
+    if let Some(colon_pos) = path_name.rfind(':') {
+        let range_part = &path_name[colon_pos + 1..];
+        if let Some(dash_pos) = range_part.find('-') {
+            // Verify both parts are numbers
+            if range_part[..dash_pos].parse::<u64>().is_ok()
+                && range_part[dash_pos + 1..].parse::<u64>().is_ok()
+            {
+                return &path_name[..colon_pos];
+            }
+        }
+    }
+    path_name
 }
 
 /// Render graph as SVG with vector fonts
@@ -1939,8 +1991,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let axis_x_end = total_width;
 
         // Draw axis label on the left
+        // Strip the :start-end range from the label when showing absolute coordinates
         let label_text = if coord_system.to_lowercase() == "pangenomic" {
             "pangenomic".to_string()
+        } else if args.x_axis_absolute {
+            strip_subpath_range(coord_system).to_string()
         } else {
             coord_system.clone()
         };
@@ -1972,10 +2027,16 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
         // Calculate tick positions and labels
         let num_ticks = args.x_ticks.max(2) as usize;
+        let is_pangenomic = coord_system.to_lowercase() == "pangenomic";
+
+        // Warn if --x-axis-absolute is used with pangenomic
+        if args.x_axis_absolute && is_pangenomic {
+            debug!("--x-axis-absolute has no effect with pangenomic coordinates");
+        }
 
         // For pangenomic coordinates, use total graph length
         // For path-based coordinates, find the path and use its length
-        let (coord_start, coord_end) = if coord_system.to_lowercase() == "pangenomic" {
+        let (coord_start, coord_end) = if is_pangenomic {
             (0u64, len_to_visualize)
         } else {
             // Find the path with the specified name
@@ -1991,7 +2052,13 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                         }
                     })
                     .sum();
-                (0u64, path_len)
+                // Add subpath start offset if --x-axis-absolute is enabled
+                let offset = if args.x_axis_absolute {
+                    parse_subpath_start(coord_system)
+                } else {
+                    0
+                };
+                (offset, offset + path_len)
             } else {
                 // Path not found, fall back to pangenomic
                 debug!("Path '{}' not found, using pangenomic coordinates", coord_system);
