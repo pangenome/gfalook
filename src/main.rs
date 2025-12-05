@@ -58,6 +58,10 @@ struct Args {
     #[arg(long = "max-clusters", value_name = "N", requires = "cluster_paths", help_heading = "Clustering")]
     max_clusters: Option<usize>,
 
+    /// Show only one representative path (medoid) per cluster.
+    #[arg(short = 'K', long = "cluster-representatives", requires = "cluster_paths", help_heading = "Clustering")]
+    cluster_representatives: bool,
+
     // === Path Selection ===
     /// List of paths to display in the specified order.
     #[arg(short = 'p', long = "paths-to-display", value_name = "FILE", help_heading = "Path Selection")]
@@ -866,6 +870,8 @@ struct ClusteringResult {
     ordering: Vec<usize>,
     cluster_ids: Vec<usize>,
     num_clusters: usize,
+    representatives: Vec<usize>,  // medoid index (into original paths array) per cluster
+    cluster_sizes: Vec<usize>,    // member count per cluster
 }
 
 /// Union-Find data structure for DBSCAN clustering
@@ -1069,7 +1075,13 @@ fn cluster_paths_by_similarity(
     max_clusters: Option<usize>,
 ) -> ClusteringResult {
     if paths.is_empty() {
-        return ClusteringResult { ordering: Vec::new(), cluster_ids: Vec::new(), num_clusters: 0 };
+        return ClusteringResult {
+            ordering: Vec::new(),
+            cluster_ids: Vec::new(),
+            num_clusters: 0,
+            representatives: Vec::new(),
+            cluster_sizes: Vec::new(),
+        };
     }
 
     let n = paths.len();
@@ -1232,6 +1244,38 @@ fn cluster_paths_by_similarity(
     // Sort clusters by size (largest first) for consistent ordering
     cluster_members.sort_by(|a, b| b.len().cmp(&a.len()));
 
+    // Compute medoid for each cluster (path with minimum average distance to others)
+    let mut representatives: Vec<usize> = Vec::with_capacity(num_clusters);
+    let mut cluster_sizes: Vec<usize> = Vec::with_capacity(num_clusters);
+
+    for members in &cluster_members {
+        cluster_sizes.push(members.len());
+
+        if members.len() == 1 {
+            // Singleton: the single member is the representative
+            representatives.push(members[0]);
+        } else {
+            // Find medoid: member with minimum average distance to all others
+            let mut best_medoid = members[0];
+            let mut best_avg_dist = f64::MAX;
+
+            for &candidate in members {
+                let sum_dist: f64 = members
+                    .iter()
+                    .filter(|&&m| m != candidate)
+                    .map(|&m| dist_matrix[candidate][m])
+                    .sum();
+                let avg_dist = sum_dist / (members.len() - 1) as f64;
+
+                if avg_dist < best_avg_dist {
+                    best_avg_dist = avg_dist;
+                    best_medoid = candidate;
+                }
+            }
+            representatives.push(best_medoid);
+        }
+    }
+
     // Build final ordering: within each cluster, order by greedy nearest-neighbor
     let mut ordering = Vec::with_capacity(n);
     let mut final_cluster_ids = Vec::with_capacity(n);
@@ -1295,6 +1339,8 @@ fn cluster_paths_by_similarity(
         ordering,
         cluster_ids: final_cluster_ids,
         num_clusters,
+        representatives,
+        cluster_sizes,
     }
 }
 
@@ -1466,7 +1512,6 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
     }
 
-    let path_count = display_paths.len() as u32;
     let pix_per_path = args.path_height;
     let bottom_padding = 5u32;
 
@@ -1482,14 +1527,43 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
+        let original_paths = display_paths.clone(); // Save for medoids TSV
         let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
+        // Write medoids TSV
+        write_medoids_tsv(&args.out, &original_paths, &result);
+
+        // Filter to representatives only if requested
+        let result = if args.cluster_representatives {
+            let rep_set: FxHashSet<usize> = result.representatives.iter().copied().collect();
+            let mut filtered_paths = Vec::new();
+            let mut filtered_cluster_ids = Vec::new();
+            for (pos, &orig_idx) in result.ordering.iter().enumerate() {
+                if rep_set.contains(&orig_idx) {
+                    filtered_paths.push(display_paths[pos]);
+                    filtered_cluster_ids.push(result.cluster_ids[pos]);
+                }
+            }
+            display_paths = filtered_paths;
+            ClusteringResult {
+                ordering: (0..display_paths.len()).collect(),
+                cluster_ids: filtered_cluster_ids,
+                num_clusters: result.num_clusters,
+                representatives: result.representatives,
+                cluster_sizes: result.cluster_sizes,
+            }
+        } else {
+            result
+        };
         Some(result)
     } else {
         None
     };
+
+    // Recalculate path_count after potential filtering by cluster_representatives
+    let path_count = display_paths.len() as u32;
 
     // Calculate total gap space needed for cluster separators
     let total_gap = if let Some(ref cr) = cluster_result {
@@ -1531,6 +1605,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         "COMPRESSED_MODE".len()
     } else if let Some(ref pg) = path_grouping {
         pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
+    } else if args.cluster_representatives {
+        // Account for " (n=X)" suffix: max cluster size determines suffix length
+        let max_size = cluster_result.as_ref().map(|cr| cr.cluster_sizes.iter().max().copied().unwrap_or(1)).unwrap_or(1);
+        let suffix_len = format!(" (n={})", max_size).len();
+        display_paths.iter().map(|p| p.name.len() + suffix_len).max().unwrap_or(10)
     } else {
         display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
     };
@@ -1896,7 +1975,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             break;
         }
         // Check if grouping is enabled and get group index
-        let (row_idx, display_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
+        let (row_idx, base_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
             let group_idx = pg.path_to_group[path_idx];
             if group_idx < 0 {
                 // Skip paths that don't match any prefix
@@ -1906,9 +1985,22 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             if first {
                 rendered_groups.insert(group_idx);
             }
-            (group_idx as u32, pg.prefixes[group_idx as usize].as_str(), first)
+            (group_idx as u32, pg.prefixes[group_idx as usize].clone(), first)
         } else {
-            (path_idx as u32, path.name.as_str(), true)
+            (path_idx as u32, path.name.clone(), true)
+        };
+
+        // Add abundance suffix for cluster representatives
+        let display_name = if args.cluster_representatives {
+            if let Some(ref cr) = cluster_result {
+                let cluster_id = cr.cluster_ids[path_idx];
+                let size = cr.cluster_sizes[cluster_id];
+                format!("{} (n={})", base_name, size)
+            } else {
+                base_name
+            }
+        } else {
+            base_name
         };
 
         // Add gap before new cluster (except first)
@@ -2419,6 +2511,32 @@ fn write_cluster_tsv(
     }
 }
 
+/// Write cluster medoids (representatives) to a TSV file
+fn write_medoids_tsv(
+    output_path: &PathBuf,
+    original_paths: &[&GfaPath],
+    cluster_result: &ClusteringResult,
+) {
+    // Derive TSV path from output path: foo.png -> foo.medoids.tsv
+    let tsv_path = output_path.with_extension("medoids.tsv");
+
+    let mut content = String::from("cluster\tmedoid.path\tcluster.size\n");
+    for (cluster_id, (&medoid_idx, &size)) in cluster_result
+        .representatives
+        .iter()
+        .zip(cluster_result.cluster_sizes.iter())
+        .enumerate()
+    {
+        let medoid_name = &original_paths[medoid_idx].name;
+        content.push_str(&format!("{}\t{}\t{}\n", cluster_id, medoid_name, size));
+    }
+
+    match std::fs::write(&tsv_path, content) {
+        Ok(_) => info!("Cluster medoids saved to {:?}", tsv_path),
+        Err(e) => eprintln!("Warning: could not write medoids TSV: {}", e),
+    }
+}
+
 /// Escape special XML characters
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -2498,7 +2616,6 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
     }
 
-    let path_count = display_paths.len() as u32;
     let pix_per_path = args.path_height;
 
     let len_to_visualize = graph.total_length;
@@ -2531,14 +2648,43 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
+        let original_paths = display_paths.clone(); // Save for medoids TSV
         let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
+        // Write medoids TSV
+        write_medoids_tsv(&args.out, &original_paths, &result);
+
+        // Filter to representatives only if requested
+        let result = if args.cluster_representatives {
+            let rep_set: FxHashSet<usize> = result.representatives.iter().copied().collect();
+            let mut filtered_paths = Vec::new();
+            let mut filtered_cluster_ids = Vec::new();
+            for (pos, &orig_idx) in result.ordering.iter().enumerate() {
+                if rep_set.contains(&orig_idx) {
+                    filtered_paths.push(display_paths[pos]);
+                    filtered_cluster_ids.push(result.cluster_ids[pos]);
+                }
+            }
+            display_paths = filtered_paths;
+            ClusteringResult {
+                ordering: (0..display_paths.len()).collect(),
+                cluster_ids: filtered_cluster_ids,
+                num_clusters: result.num_clusters,
+                representatives: result.representatives,
+                cluster_sizes: result.cluster_sizes,
+            }
+        } else {
+            result
+        };
         Some(result)
     } else {
         None
     };
+
+    // Recalculate path_count after potential filtering by cluster_representatives
+    let path_count = display_paths.len() as u32;
 
     // Load prefix grouping if specified (SVG) - must be after clustering check
     let path_grouping: Option<PathGrouping> = args.prefix_merges.as_ref().and_then(|p| {
@@ -2569,6 +2715,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         "COMPRESSED_MODE".len()
     } else if let Some(ref pg) = path_grouping {
         pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
+    } else if args.cluster_representatives {
+        // Account for " (n=X)" suffix: max cluster size determines suffix length
+        let max_size = cluster_result.as_ref().map(|cr| cr.cluster_sizes.iter().max().copied().unwrap_or(1)).unwrap_or(1);
+        let suffix_len = format!(" (n={})", max_size).len();
+        display_paths.iter().map(|p| p.name.len() + suffix_len).max().unwrap_or(10)
     } else {
         display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
     };
@@ -2941,7 +3092,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             break;
         }
         // Check if grouping is enabled and get group index
-        let (row_idx, display_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
+        let (row_idx, base_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
             let group_idx = pg.path_to_group[path_idx];
             if group_idx < 0 {
                 // Skip paths that don't match any prefix
@@ -2951,9 +3102,22 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             if first {
                 rendered_groups.insert(group_idx);
             }
-            (group_idx as u32, pg.prefixes[group_idx as usize].as_str(), first)
+            (group_idx as u32, pg.prefixes[group_idx as usize].clone(), first)
         } else {
-            (path_idx as u32, path.name.as_str(), true)
+            (path_idx as u32, path.name.clone(), true)
+        };
+
+        // Add abundance suffix for cluster representatives
+        let display_name = if args.cluster_representatives {
+            if let Some(ref cr) = cluster_result {
+                let cluster_id = cr.cluster_ids[path_idx];
+                let size = cr.cluster_sizes[cluster_id];
+                format!("{} (n={})", base_name, size)
+            } else {
+                base_name
+            }
+        } else {
+            base_name
         };
 
         // Add gap before new cluster (except first)
@@ -3003,7 +3167,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             };
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="{}">{}</text>"#,
-                cluster_bar_width + 5.0, text_y, text_color, escape_xml(display_name)
+                cluster_bar_width + 5.0, text_y, text_color, escape_xml(&display_name)
             ));
             svg.push('\n');
         }

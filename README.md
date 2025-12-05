@@ -115,6 +115,14 @@ gfalook -i graph.gfa -o clustered.png -x 1000 -y 500 -k -m
 
 ![Path clustering](images/clustered.png)
 
+Show only cluster representatives (medoids) with `-K`. Each path label shows the cluster size:
+
+```bash
+gfalook -i graph.gfa -o clustered_representatives.png -x 1000 -y 500 -k -K -m
+```
+
+![Cluster representatives](images/clustered_representatives.png)
+
 ### X-axis with pangenomic coordinates (`--x-axis pangenomic`)
 
 Display coordinates based on node order in the graph:
