@@ -2503,12 +2503,22 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
     let len_to_visualize = graph.total_length;
 
-    // Calculate width - if show_all_nodes, ensure each segment gets at least node_width pixels
+    // Calculate width - if show_all_nodes, ensure smallest segment gets at least node_width pixels
     let viz_width = if args.show_all_nodes {
-        let num_segments = graph.segments.len() as u32;
-        let min_width = num_segments * args.node_width;
-        debug!("show_all_nodes: {} segments × {} px = {} min width (user width: {})",
-            num_segments, args.node_width, min_width, args.width);
+        // Find the smallest segment length
+        let min_seg_len = graph.segments.iter()
+            .map(|s| s.sequence_len)
+            .filter(|&len| len > 0)
+            .min()
+            .unwrap_or(1) as u32;
+
+        // Calculate width needed so smallest segment gets node_width pixels
+        // bin_width = total_length / viz_width, we want bin_width <= min_seg_len / node_width
+        // So viz_width >= total_length * node_width / min_seg_len
+        let min_width = ((len_to_visualize as u64 * args.node_width as u64) / min_seg_len as u64) as u32;
+
+        debug!("show_all_nodes: min_seg={}bp, need {}px width for {}px/node",
+            min_seg_len, min_width, args.node_width);
         min_width.max(args.width)
     } else {
         args.width.min(len_to_visualize as u32)
