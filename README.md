@@ -105,6 +105,48 @@ gfalook -i graph.gfa -o compressed.png -x 1000 -y 100 -O
 
 ![Compressed mode](images/compressed.png)
 
+### Path clustering (`-k`)
+
+Automatically cluster and reorder paths by similarity. Colored bars on the left indicate cluster membership:
+
+```bash
+gfalook -i graph.gfa -o clustered.png -x 1000 -y 500 -k
+```
+
+![Path clustering](images/clustered.png)
+
+### X-axis with pangenomic coordinates (`--x-axis pangenomic`)
+
+Display coordinates based on node order in the graph:
+
+```bash
+gfalook -i graph.gfa -o xaxis_pangenomic.png -x 1000 -y 500 --x-axis pangenomic --x-ticks 5
+```
+
+![X-axis pangenomic](images/xaxis_pangenomic.png)
+
+### X-axis with path reference (`--x-axis <path>`)
+
+Display coordinates based on a reference path (e.g., chm13):
+
+```bash
+gfalook -i graph.gfa -o xaxis_chm13.png -x 1000 -y 500 \
+    --x-axis "chm13#chr6:31825251-31908851" --x-ticks 5
+```
+
+![X-axis chm13](images/xaxis_chm13.png)
+
+### X-axis with absolute coordinates (`--x-axis-absolute`)
+
+Show absolute chromosome coordinates instead of relative positions:
+
+```bash
+gfalook -i graph.gfa -o xaxis_chm13_abs.png -x 1000 -y 500 \
+    --x-axis "chm13#chr6:31825251-31908851" --x-ticks 5 --x-axis-absolute
+```
+
+![X-axis absolute](images/xaxis_chm13_abs.png)
+
 ## Options Reference
 
 ### Core Options
