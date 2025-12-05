@@ -54,6 +54,10 @@ struct Args {
     #[arg(long = "cluster-gap", value_name = "N", requires = "cluster_paths", default_value_t = 10, help_heading = "Clustering")]
     cluster_gap: u32,
 
+    /// Maximum number of clusters allowed (automatic if not specified).
+    #[arg(long = "max-clusters", value_name = "N", requires = "cluster_paths", help_heading = "Clustering")]
+    max_clusters: Option<usize>,
+
     // === Path Selection ===
     /// List of paths to display in the specified order.
     #[arg(short = 'p', long = "paths-to-display", value_name = "FILE", help_heading = "Path Selection")]
@@ -200,6 +204,7 @@ struct Args {
 #[derive(Debug, Clone)]
 struct Segment {
     sequence_len: u64,
+    n_count: u64,  // Number of uncalled bases (N's) in the sequence
 }
 
 /// An edge between two segments
@@ -380,6 +385,126 @@ const COLORBREWER_SPECTRAL_13: [(u8, u8, u8); 13] = [
     (94, 79, 162),
 ];
 
+/// ColorBrewer RdBu 11-class diverging palette (used for compressed mode by default)
+const COLORBREWER_RDBU_11: [(u8, u8, u8); 11] = [
+    (103, 0, 31),
+    (178, 24, 43),
+    (214, 96, 77),
+    (244, 165, 130),
+    (253, 219, 199),
+    (247, 247, 247),
+    (209, 229, 240),
+    (146, 197, 222),
+    (67, 147, 195),
+    (33, 102, 172),
+    (5, 48, 97),
+];
+
+/// ColorBrewer RdYlGn 11-class diverging palette
+const COLORBREWER_RDYLGN_11: [(u8, u8, u8); 11] = [
+    (165, 0, 38),
+    (215, 48, 39),
+    (244, 109, 67),
+    (253, 174, 97),
+    (254, 224, 139),
+    (255, 255, 191),
+    (217, 239, 139),
+    (166, 217, 106),
+    (102, 189, 99),
+    (26, 152, 80),
+    (0, 104, 55),
+];
+
+/// ColorBrewer PiYG 11-class diverging palette
+const COLORBREWER_PIYG_11: [(u8, u8, u8); 11] = [
+    (142, 1, 82),
+    (197, 27, 125),
+    (222, 119, 174),
+    (241, 182, 218),
+    (253, 224, 239),
+    (247, 247, 247),
+    (230, 245, 208),
+    (184, 225, 134),
+    (127, 188, 65),
+    (77, 146, 33),
+    (39, 100, 25),
+];
+
+/// ColorBrewer PRGn 11-class diverging palette
+const COLORBREWER_PRGN_11: [(u8, u8, u8); 11] = [
+    (64, 0, 75),
+    (118, 42, 131),
+    (153, 112, 171),
+    (194, 165, 207),
+    (231, 212, 232),
+    (247, 247, 247),
+    (217, 240, 211),
+    (166, 219, 160),
+    (90, 174, 97),
+    (27, 120, 55),
+    (0, 68, 27),
+];
+
+/// ColorBrewer RdYlBu 11-class diverging palette
+const COLORBREWER_RDYLBU_11: [(u8, u8, u8); 11] = [
+    (165, 0, 38),
+    (215, 48, 39),
+    (244, 109, 67),
+    (253, 174, 97),
+    (254, 224, 144),
+    (255, 255, 191),
+    (224, 243, 248),
+    (171, 217, 233),
+    (116, 173, 209),
+    (69, 117, 180),
+    (49, 54, 149),
+];
+
+/// ColorBrewer BrBG 11-class diverging palette
+const COLORBREWER_BRBG_11: [(u8, u8, u8); 11] = [
+    (84, 48, 5),
+    (140, 81, 10),
+    (191, 129, 45),
+    (223, 194, 125),
+    (246, 232, 195),
+    (245, 245, 245),
+    (199, 234, 229),
+    (128, 205, 193),
+    (53, 151, 143),
+    (1, 102, 94),
+    (0, 60, 48),
+];
+
+/// Get a ColorBrewer palette by name. Returns the palette colors or None if not found.
+/// Supports: Spectral, RdBu, RdYlGn, PiYG, PRGn, RdYlBu, BrBG (all 11-class)
+fn get_colorbrewer_palette(name: &str) -> Option<&'static [(u8, u8, u8)]> {
+    match name.to_lowercase().as_str() {
+        "spectral" => Some(&COLORBREWER_SPECTRAL_13[2..]), // Skip the 2 grey colors
+        "rdbu" => Some(&COLORBREWER_RDBU_11),
+        "rdylgn" => Some(&COLORBREWER_RDYLGN_11),
+        "piyg" => Some(&COLORBREWER_PIYG_11),
+        "prgn" => Some(&COLORBREWER_PRGN_11),
+        "rdylbu" => Some(&COLORBREWER_RDYLBU_11),
+        "brbg" => Some(&COLORBREWER_BRBG_11),
+        _ => None,
+    }
+}
+
+/// Parse colorbrewer palette argument "SCHEME:N" and return (scheme_name, n)
+fn parse_colorbrewer_arg(arg: &str) -> Option<(String, usize)> {
+    let parts: Vec<&str> = arg.split(':').collect();
+    if parts.len() == 2 {
+        if let Ok(n) = parts[1].parse::<usize>() {
+            return Some((parts[0].to_string(), n));
+        }
+    }
+    // Just scheme name without :N
+    if parts.len() == 1 {
+        return Some((parts[0].to_string(), 11));
+    }
+    None
+}
+
 /// ColorBrewer Set1 qualitative palette for cluster indicators
 /// 9 distinct colors that are easy to distinguish
 const CLUSTER_COLORS: [(u8, u8, u8); 9] = [
@@ -414,10 +539,13 @@ fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
             let parts: Vec<&str> = line.split('\t').collect();
             if parts.len() >= 3 {
                 let name = parts[1].to_string();
-                let seq_len = parts[2].len() as u64;
+                let seq = parts[2];
+                let seq_len = seq.len() as u64;
+                // Count uncalled bases (N's)
+                let n_count = seq.bytes().filter(|&b| b == b'N' || b == b'n').count() as u64;
                 let id = graph.segments.len() as u64;
                 graph.segment_name_to_id.insert(name, id);
-                graph.segments.push(Segment { sequence_len: seq_len });
+                graph.segments.push(Segment { sequence_len: seq_len, n_count });
             }
         }
     }
@@ -646,6 +774,93 @@ fn load_paths_to_display(path: &PathBuf) -> std::io::Result<Vec<String>> {
     Ok(paths)
 }
 
+/// Load node IDs to highlight from a file (one ID per line)
+fn load_highlight_node_ids(path: &PathBuf) -> std::io::Result<FxHashSet<u64>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut node_ids = FxHashSet::default();
+
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if !line.is_empty() {
+            if let Ok(id) = line.parse::<u64>() {
+                node_ids.insert(id);
+            }
+        }
+    }
+
+    Ok(node_ids)
+}
+
+/// Result of path grouping by prefix
+struct PathGrouping {
+    /// For each original path index, the group index (-1 if not grouped)
+    path_to_group: Vec<i64>,
+    /// List of valid prefixes (group names)
+    prefixes: Vec<String>,
+    /// Number of groups
+    num_groups: usize,
+}
+
+/// Load prefixes and create path groupings
+fn load_prefix_merges(path: &PathBuf, paths: &[GfaPath]) -> std::io::Result<PathGrouping> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut prefixes_tmp: Vec<String> = Vec::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
+
+    // Read all prefixes from file
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim().to_string();
+        if !line.is_empty() {
+            if seen.contains(&line) {
+                eprintln!("[gfalook] warning: duplicate prefix found: {}", line);
+            } else {
+                prefixes_tmp.push(line.clone());
+                seen.insert(line);
+            }
+        }
+    }
+
+    let mut path_to_group: Vec<i64> = vec![-1; paths.len()];
+    let mut prefixes: Vec<String> = Vec::new();
+
+    // Assign each path to a group based on matching prefix
+    for (path_idx, gfa_path) in paths.iter().enumerate() {
+        let mut found = false;
+
+        // First search in already validated prefixes
+        for (group_idx, prefix) in prefixes.iter().enumerate() {
+            if gfa_path.name.starts_with(prefix) {
+                path_to_group[path_idx] = group_idx as i64;
+                found = true;
+                break;
+            }
+        }
+
+        // If not found, search in all read prefixes
+        if !found {
+            for prefix in &prefixes_tmp {
+                if gfa_path.name.starts_with(prefix) {
+                    let group_idx = prefixes.len();
+                    prefixes.push(prefix.clone());
+                    path_to_group[path_idx] = group_idx as i64;
+                    break;
+                }
+            }
+        }
+    }
+
+    let num_groups = prefixes.len();
+    Ok(PathGrouping {
+        path_to_group,
+        prefixes,
+        num_groups,
+    })
+}
+
 /// Result of path clustering
 struct ClusteringResult {
     ordering: Vec<usize>,
@@ -760,28 +975,43 @@ fn dbscan_cluster(dist_matrix: &[Vec<f64>], eps: f64) -> Vec<usize> {
 }
 
 /// Find optimal eps using cosigt's stabilization detection
-/// Tests eps from 0.01 to 0.30, finds where cluster count stabilizes
-fn find_optimal_eps(dist_matrix: &[Vec<f64>], n_paths: usize) -> f64 {
+/// Tests eps from 0.001 to 0.300, finds where cluster count stabilizes
+fn find_optimal_eps(dist_matrix: &[Vec<f64>], n_paths: usize, max_clusters_override: Option<usize>) -> f64 {
     if dist_matrix.is_empty() {
         return 0.30;
     }
 
+    // Determine max_clusters: use override if provided, otherwise ~11% of paths
+    let max_clusters = max_clusters_override.unwrap_or_else(|| (n_paths + 8) / 9);
+    debug!("DBSCAN max_clusters: {} ({})", max_clusters,
+           if max_clusters_override.is_some() { "user override" } else { "automatic" });
+
     // cosigt: pclust <- length(table(dbscan(distanceMatrix, eps = 0, minPts = 1)$cluster))
     let mut prev_clusters = dbscan_count_clusters(dist_matrix, 0.0);
+    debug!("DBSCAN eps scan: eps=0.00 -> {} clusters", prev_clusters);
 
-    // cosigt: for (eps in seq(0.01, 0.30, 0.01))
-    for eps_int in 1..=30 {
-        let eps = eps_int as f64 / 100.0;
+    // eps from 0.005 to 0.300 in steps of 0.005
+    for eps_int in 1..=60 {
+        let eps = eps_int as f64 * 0.005;
         let curr_clusters = dbscan_count_clusters(dist_matrix, eps);
 
         // cosigt: if (abs(pclust - cclust) <= 1)
         let change = (prev_clusters as i64 - curr_clusters as i64).abs();
-        if change <= 1 {
-            // cosigt: if ((cclust <= round(attr(distanceMatrix, "Size") / 10)))
-            let max_clusters = n_paths / 10;
+        debug!("DBSCAN eps scan: eps={:.3} -> {} clusters (change={} from prev={}, max_allowed={})", eps, curr_clusters, change, prev_clusters, max_clusters);
+
+        // Modified stabilization: also accept when we first reach <= max_clusters
+        // This captures cases where cluster count jumps directly to the target
+        let first_hit_max = prev_clusters > max_clusters && curr_clusters <= max_clusters;
+
+        if change <= 1 || first_hit_max {
             if curr_clusters <= max_clusters {
-                debug!("DBSCAN: stabilized at eps {:.2} with {} clusters (max allowed: {})",
-                       eps, curr_clusters, max_clusters);
+                if first_hit_max && change > 1 {
+                    debug!("DBSCAN: first hit max_clusters at eps {:.3} with {} clusters (jumped from {})",
+                           eps, curr_clusters, prev_clusters);
+                } else {
+                    debug!("DBSCAN: stabilized at eps {:.3} with {} clusters (max allowed: {})",
+                           eps, curr_clusters, max_clusters);
+                }
                 return eps;
             }
         }
@@ -836,6 +1066,7 @@ fn cluster_paths_by_similarity(
     segment_lengths: &[u64],  // segment_id -> length (0-indexed by segment_id - 1)
     threshold: Option<f64>,
     use_all_nodes: bool,
+    max_clusters: Option<usize>,
 ) -> ClusteringResult {
     if paths.is_empty() {
         return ClusteringResult { ordering: Vec::new(), cluster_ids: Vec::new(), num_clusters: 0 };
@@ -934,6 +1165,11 @@ fn cluster_paths_by_similarity(
     let max_edr = pairs.iter().map(|(_, _, edr)| *edr).fold(0.0f64, f64::max);
     debug!("Max EDR: {:.6}", max_edr);
 
+    // Debug: print first few EDR values for comparison with odgi
+    for (i, j, edr) in pairs.iter().take(5) {
+        debug!("EDR: {} vs {} = {:.6}", paths[*i].name, paths[*j].name, edr);
+    }
+
     // Build normalized distance matrix (like cosigt: normRegularMatrix <- regularMatrix / maxD)
     let mut dist_matrix: Vec<Vec<f64>> = vec![vec![0.0; n]; n];
     for (i, j, edr) in pairs {
@@ -967,7 +1203,7 @@ fn cluster_paths_by_similarity(
             debug!("Using user-specified threshold {:.2} (eps = {:.2})", t, e);
             e
         }
-        None => find_optimal_eps(&dist_matrix, n),
+        None => find_optimal_eps(&dist_matrix, n, max_clusters),
     };
     debug!("DBSCAN eps: {:.2}", eps);
 
@@ -1055,6 +1291,9 @@ fn cluster_paths_by_similarity(
 struct BinInfo {
     mean_depth: f64,
     mean_inv: f64,
+    mean_pos: f64,       // mean position within path (for darkness gradient)
+    mean_uncalled: f64,  // proportion of uncalled bases (N's) in bin
+    highlighted: bool,   // whether this bin contains highlighted nodes
 }
 
 fn write_char(
@@ -1148,20 +1387,57 @@ fn add_edge_point(buffer: &mut [u8], width: u32, x: u32, y: u32, path_space: u32
     }
 }
 
-/// Get color for depth using Spectral colorbrewer palette (with grey for low coverage)
-fn get_depth_color(mean_depth: f64) -> (u8, u8, u8) {
-    // Cuts at 0.5, 1.5, 2.5, ..., 12.5 (13 bins for 13 colors)
-    let cuts = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5];
-
-    for (i, &cut) in cuts.iter().enumerate() {
-        if mean_depth <= cut {
-            return COLORBREWER_SPECTRAL_13[i];
+/// Get color for depth using colorbrewer palette (with optional grey for low coverage)
+fn get_depth_color(mean_depth: f64, no_grey_depth: bool, palette: Option<&[(u8, u8, u8)]>) -> (u8, u8, u8) {
+    // Use custom palette if provided, otherwise use Spectral
+    if let Some(pal) = palette {
+        // Custom palette: distribute colors evenly across depth range
+        let n = pal.len();
+        if n == 0 {
+            return (128, 128, 128);
         }
+        // Map mean_depth to palette index (1-based depths, so depth 1 = index 0)
+        let idx = if no_grey_depth {
+            // Use full palette range
+            ((mean_depth - 1.0).max(0.0) / (n as f64)).floor() as usize
+        } else {
+            // First color for < 0.5x, second for < 1.5x, rest distributed
+            if mean_depth < 0.5 {
+                return (196, 196, 196); // Grey for very low
+            } else if mean_depth < 1.5 {
+                return (128, 128, 128); // Grey for low
+            }
+            ((mean_depth - 1.5) / (n as f64)).floor() as usize
+        };
+        pal[idx.min(n - 1)]
+    } else if no_grey_depth {
+        // Use full Spectral 11 range for all depths (skip grey colors at indices 0-1)
+        let cuts = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5];
+        for (i, &cut) in cuts.iter().enumerate() {
+            if mean_depth <= cut {
+                return COLORBREWER_SPECTRAL_13[i + 2];
+            }
+        }
+        COLORBREWER_SPECTRAL_13[12]
+    } else {
+        // Default: use grey for low coverage (indices 0-1), Spectral for rest
+        let cuts = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5];
+        for (i, &cut) in cuts.iter().enumerate() {
+            if mean_depth <= cut {
+                return COLORBREWER_SPECTRAL_13[i];
+            }
+        }
+        COLORBREWER_SPECTRAL_13[12]
     }
-    COLORBREWER_SPECTRAL_13[12]
 }
 
 fn render(args: &Args, graph: &Graph) -> Vec<u8> {
+    // Check for conflicting options
+    if args.cluster_paths && args.prefix_merges.is_some() {
+        eprintln!("[gfalook] error: -k/--cluster-paths cannot be used with -M/--prefix-merges.");
+        std::process::exit(1);
+    }
+
     let mut display_paths: Vec<&GfaPath> = graph.paths.iter().collect();
 
     if let Some(ref prefix) = args.ignore_prefix {
@@ -1194,7 +1470,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
-        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes);
+        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
@@ -1210,11 +1486,38 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         0
     };
 
+    // Load prefix grouping if specified (PNG) - must be after clustering check
+    let path_grouping: Option<PathGrouping> = args.prefix_merges.as_ref().and_then(|p| {
+        let paths_vec: Vec<GfaPath> = display_paths.iter().map(|&p| p.clone()).collect();
+        match load_prefix_merges(p, &paths_vec) {
+            Ok(grouping) => {
+                info!("Read {} valid prefixes for {} groups", grouping.prefixes.len(), grouping.num_groups);
+                Some(grouping)
+            }
+            Err(e) => {
+                eprintln!("[gfalook] warning: failed to load prefix merges: {}", e);
+                None
+            }
+        }
+    });
+
+    // Effective row count: use num_groups if grouping is enabled
+    let effective_row_count = if let Some(ref pg) = path_grouping {
+        pg.num_groups as u32
+    } else {
+        path_count
+    };
+
     debug!("Binned mode");
     debug!("bin width: {:.2e}", bin_width);
     debug!("image width: {}", viz_width);
 
-    let max_name_len = display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10);
+    // Use prefix names for max_name_len when grouping
+    let max_name_len = if let Some(ref pg) = path_grouping {
+        pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
+    } else {
+        display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
+    };
     let max_num_of_chars = args.max_num_of_characters.unwrap_or(max_name_len.min(128));
     let char_size = ((pix_per_path / 8) * 8).min(64).max(8);
 
@@ -1232,7 +1535,20 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     // Total left panel width includes cluster bar + path names
     let path_names_width = text_only_width + cluster_bar_width;
 
-    let path_space = path_count * pix_per_path + total_gap;
+    let path_space = effective_row_count * pix_per_path + total_gap;
+
+    // Load colorbrewer palette if specified
+    let depth_palette: Option<&[(u8, u8, u8)]> = args.colorbrewer_palette.as_ref().and_then(|arg| {
+        if let Some((scheme, _n)) = parse_colorbrewer_arg(arg) {
+            get_colorbrewer_palette(&scheme).or_else(|| {
+                eprintln!("[gfalook] warning: unknown colorbrewer palette '{}', using default Spectral", scheme);
+                None
+            })
+        } else {
+            eprintln!("[gfalook] warning: invalid colorbrewer palette format '{}', expected SCHEME:N", arg);
+            None
+        }
+    });
 
     // Height for edge visualization area - matches odgi's calculation
     // height = min(len_to_visualize, args.height + bottom_padding)
@@ -1262,12 +1578,53 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         .as_ref()
         .and_then(|p| load_path_colors(p).ok());
 
-    // Render each path
+    // Load highlight node IDs if specified
+    let highlight_nodes: Option<FxHashSet<u64>> = args
+        .highlight_node_ids
+        .as_ref()
+        .and_then(|p| load_highlight_node_ids(p).ok());
+
+    // Track which groups have already been rendered (for path names)
+    let mut rendered_groups: FxHashSet<i64> = FxHashSet::default();
+
+    // Calculate max path length for longest-path option
+    let max_path_length: u64 = if args.longest_path || args.change_darkness {
+        display_paths.iter().map(|path| {
+            path.steps.iter().map(|step| {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    graph.segments[seg_id].sequence_len
+                } else {
+                    0
+                }
+            }).sum::<u64>()
+        }).max().unwrap_or(1)
+    } else {
+        1
+    };
+
+    // Render each path (PNG)
     let mut prev_cluster_id: Option<usize> = None;
     let mut cumulative_gap: u32 = 0;
     let cluster_gap = args.cluster_gap;
 
     for (path_idx, path) in display_paths.iter().enumerate() {
+        // Check if grouping is enabled and get group index
+        let (row_idx, display_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
+            let group_idx = pg.path_to_group[path_idx];
+            if group_idx < 0 {
+                // Skip paths that don't match any prefix
+                continue;
+            }
+            let first = !rendered_groups.contains(&group_idx);
+            if first {
+                rendered_groups.insert(group_idx);
+            }
+            (group_idx as u32, pg.prefixes[group_idx as usize].as_str(), first)
+        } else {
+            (path_idx as u32, path.name.as_str(), true)
+        };
+
         // Add gap before new cluster (except first)
         if let Some(ref cr) = cluster_result {
             let cluster_id = cr.cluster_ids[path_idx];
@@ -1277,15 +1634,17 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             prev_cluster_id = Some(cluster_id);
         }
 
-        let y_start = path_idx as u32 * pix_per_path + cumulative_gap;
+        let y_start = row_idx * pix_per_path + cumulative_gap;
 
-        // Render cluster indicator bar on the left
-        if let Some(ref cr) = cluster_result {
-            let cluster_id = cr.cluster_ids[path_idx];
-            let (cr_r, cr_g, cr_b) = get_cluster_color(cluster_id);
-            for x in 0..cluster_bar_width {
-                add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
-                    cr_r, cr_g, cr_b, true, false); // no border for cluster bar
+        // Render cluster indicator bar on the left (only for first path in group)
+        if is_first_in_group {
+            if let Some(ref cr) = cluster_result {
+                let cluster_id = cr.cluster_ids[path_idx];
+                let (cr_r, cr_g, cr_b) = get_cluster_color(cluster_id);
+                for x in 0..cluster_bar_width {
+                    add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
+                        cr_r, cr_g, cr_b, true, false); // no border for cluster bar
+                }
             }
         }
 
@@ -1296,10 +1655,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             compute_path_color(&path.name, args.color_by_prefix)
         };
 
-        // Render path name
-        if text_only_width > 0 && pix_per_path >= 8 {
-            let num_of_chars = path.name.len().min(max_num_of_chars);
-            let path_name_too_long = path.name.len() > num_of_chars;
+        // Render path name (only once per group)
+        if is_first_in_group && text_only_width > 0 && pix_per_path >= 8 {
+            let num_of_chars = display_name.len().min(max_num_of_chars);
+            let path_name_too_long = display_name.len() > num_of_chars;
             let left_padding = max_num_of_chars - num_of_chars;
 
             if args.color_path_names_background {
@@ -1310,7 +1669,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             }
 
             let base_y = y_start + pix_per_path / 2 - char_size / 2;
-            for (i, c) in path.name.chars().take(num_of_chars).enumerate() {
+            for (i, c) in display_name.chars().take(num_of_chars).enumerate() {
                 // +3 offset to match odgi's text positioning, shifted by cluster_bar_width
                 let base_x = (left_padding + i) as u32 * char_size + 3 + cluster_bar_width;
                 let char_data = if i == num_of_chars - 1 && path_name_too_long {
@@ -1323,14 +1682,34 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             }
         }
 
-        // Compute bins for this path
+        // Compute bins for this path (PNG rendering)
         let mut bins: FxHashMap<usize, BinInfo> = FxHashMap::default();
 
+        // Calculate current path length for darkness gradient
+        let path_length: u64 = path.steps.iter().map(|step| {
+            let seg_id = step.segment_id as usize;
+            if seg_id < graph.segments.len() {
+                graph.segments[seg_id].sequence_len
+            } else {
+                0
+            }
+        }).sum();
+        let darkness_length = if args.longest_path { max_path_length } else { path_length };
+
+        let mut path_pos: u64 = 0; // Track position within path
         for step in &path.steps {
             let seg_id = step.segment_id as usize;
             if seg_id < graph.segments.len() {
                 let offset = graph.segment_offsets[seg_id];
                 let seg_len = graph.segments[seg_id].sequence_len;
+                let n_count = graph.segments[seg_id].n_count;
+                // Proportion of N's in this segment (for uncalled base coloring)
+                let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
+
+                // Check if this segment is highlighted
+                let is_highlighted = highlight_nodes
+                    .as_ref()
+                    .map_or(false, |hn| hn.contains(&step.segment_id));
 
                 for k in 0..seg_len {
                     let pos = offset + k;
@@ -1340,40 +1719,141 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     if step.is_reverse {
                         entry.mean_inv += 1.0;
                     }
+                    entry.mean_pos += path_pos as f64;
+                    entry.mean_uncalled += n_proportion;
+                    if is_highlighted {
+                        entry.highlighted = true;
+                    }
+                    path_pos += 1;
                 }
             }
         }
 
-        // Normalize bin values
+        // Normalize bin values (PNG)
         for (_, v) in bins.iter_mut() {
+            if v.mean_depth > 0.0 {
+                v.mean_pos /= v.mean_depth;
+                v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
+            }
             v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
             v.mean_depth /= bin_width;
         }
 
-        // Render bins
+        // Render bins (PNG)
         for (bin_idx, bin_info) in &bins {
             let x = (*bin_idx as u32).min(viz_width - 1);
 
             // Determine color for this bin
-            let (r, g, b) = if args.color_by_mean_depth {
+            let (r, g, b) = if highlight_nodes.is_some() {
+                // Highlighting mode: red for highlighted bins, grey for others
+                if bin_info.highlighted {
+                    (255, 0, 0)
+                } else {
+                    (180, 180, 180)
+                }
+            } else if args.color_by_mean_depth {
                 // Use colorbrewer palette based on depth
-                get_depth_color(bin_info.mean_depth)
+                get_depth_color(bin_info.mean_depth, args.no_grey_depth, depth_palette)
             } else if args.color_by_mean_inversion_rate {
                 // Black to red gradient based on inversion rate
                 let inv_r = (bin_info.mean_inv * 255.0).min(255.0) as u8;
                 (inv_r, 0, 0)
+            } else if args.color_by_uncalled_bases {
+                // Black to green gradient based on proportion of uncalled bases (N's)
+                let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
+                (0, green, 0)
             } else if args.show_strand {
-                if bin_info.mean_inv > 0.5 {
-                    (200, 50, 50) // Red for reverse
+                // Check if alignment_prefix applies (if set, only apply to matching paths)
+                let apply_strand = args.alignment_prefix
+                    .as_ref()
+                    .map_or(true, |prefix| path.name.starts_with(prefix));
+
+                if apply_strand {
+                    if bin_info.mean_inv > 0.5 {
+                        (200, 50, 50) // Red for reverse
+                    } else {
+                        (50, 50, 200) // Blue for forward
+                    }
                 } else {
-                    (50, 50, 200) // Blue for forward
+                    (path_r, path_g, path_b)
                 }
             } else {
                 (path_r, path_g, path_b)
             };
 
+            // Apply darkness gradient if enabled
+            let (r, g, b) = if args.change_darkness && !highlight_nodes.is_some() {
+                // Check if alignment_prefix applies
+                let apply_darkness = args.alignment_prefix
+                    .as_ref()
+                    .map_or(true, |prefix| path.name.starts_with(prefix));
+
+                if apply_darkness && darkness_length > 0 {
+                    // Calculate darkness factor based on position
+                    let pos_factor = bin_info.mean_pos / darkness_length as f64;
+                    // In binned mode: inversion rate determines gradient direction
+                    let darkness = if bin_info.mean_inv > 0.5 {
+                        1.0 - pos_factor // gradient from right for inverted
+                    } else {
+                        pos_factor // gradient from left for forward
+                    };
+
+                    if args.white_to_black {
+                        // White to black gradient
+                        let gray = (255.0 * (1.0 - darkness)).round() as u8;
+                        (gray, gray, gray)
+                    } else {
+                        // Darken the path color
+                        let factor = 1.0 - (darkness * 0.8); // darken up to 80%
+                        ((r as f64 * factor).round() as u8,
+                         (g as f64 * factor).round() as u8,
+                         (b as f64 * factor).round() as u8)
+                    }
+                } else {
+                    (r, g, b)
+                }
+            } else {
+                (r, g, b)
+            };
+
             add_path_step(&mut buffer, total_width, x + path_names_width, y_start, pix_per_path,
                 r, g, b, args.no_path_borders, args.black_path_borders);
+        }
+
+        // Draw link lines between discontinuous path pieces
+        if let Some(link_width) = args.link_path_pieces {
+            let mut sorted_bins: Vec<usize> = bins.keys().copied().collect();
+            sorted_bins.sort();
+
+            if sorted_bins.len() > 1 {
+                let link_height = ((pix_per_path as f64 * link_width).round() as u32).max(1);
+                let link_y = y_start + pix_per_path / 2 - link_height / 2;
+
+                for i in 1..sorted_bins.len() {
+                    let prev_bin = sorted_bins[i - 1];
+                    let curr_bin = sorted_bins[i];
+
+                    // If there's a gap between bins, draw a connecting line
+                    if curr_bin > prev_bin + 1 {
+                        let x_start = (prev_bin as u32 + 1).min(viz_width - 1) + path_names_width;
+                        let x_end = (curr_bin as u32).min(viz_width - 1) + path_names_width;
+
+                        // Draw thin horizontal line
+                        for x in x_start..x_end {
+                            for dy in 0..link_height {
+                                let y = link_y + dy;
+                                let idx = ((y * total_width + x) * 4) as usize;
+                                if idx + 3 < buffer.len() {
+                                    buffer[idx] = path_r;
+                                    buffer[idx + 1] = path_g;
+                                    buffer[idx + 2] = path_b;
+                                    buffer[idx + 3] = 255;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1710,6 +2190,12 @@ fn strip_subpath_range(path_name: &str) -> &str {
 
 /// Render graph as SVG with vector fonts
 fn render_svg(args: &Args, graph: &Graph) -> String {
+    // Check for conflicting options
+    if args.cluster_paths && args.prefix_merges.is_some() {
+        eprintln!("[gfalook] error: -k/--cluster-paths cannot be used with -M/--prefix-merges.");
+        std::process::exit(1);
+    }
+
     let mut display_paths: Vec<&GfaPath> = graph.paths.iter().collect();
 
     if let Some(ref prefix) = args.ignore_prefix {
@@ -1749,7 +2235,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
-        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes);
+        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
@@ -1758,8 +2244,34 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         None
     };
 
-    // Calculate text width based on longest path name
-    let max_name_len = display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10);
+    // Load prefix grouping if specified (SVG) - must be after clustering check
+    let path_grouping: Option<PathGrouping> = args.prefix_merges.as_ref().and_then(|p| {
+        let paths_vec: Vec<GfaPath> = display_paths.iter().map(|&p| p.clone()).collect();
+        match load_prefix_merges(p, &paths_vec) {
+            Ok(grouping) => {
+                info!("Read {} valid prefixes for {} groups", grouping.prefixes.len(), grouping.num_groups);
+                Some(grouping)
+            }
+            Err(e) => {
+                eprintln!("[gfalook] warning: failed to load prefix merges: {}", e);
+                None
+            }
+        }
+    });
+
+    // Effective row count: use num_groups if grouping is enabled
+    let effective_row_count = if let Some(ref pg) = path_grouping {
+        pg.num_groups as u32
+    } else {
+        path_count
+    };
+
+    // Calculate text width based on longest path/prefix name
+    let max_name_len = if let Some(ref pg) = path_grouping {
+        pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
+    } else {
+        display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
+    };
     let font_size = (pix_per_path as f64 * 0.8).max(8.0);
     let char_width = font_size * 0.6; // Approximate monospace character width
     let text_width = if args.hide_path_names {
@@ -1771,7 +2283,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Cluster bar width (only if clustering is enabled)
     let cluster_bar_width = if cluster_result.is_some() { 10.0 } else { 0.0 };
 
-    let path_space = path_count * pix_per_path;
+    let path_space = effective_row_count * pix_per_path;
     let bottom_padding = 5u32;
     let height_param = (args.height + bottom_padding) as u64;
     let edge_height = (len_to_visualize.min(height_param)) as u32;
@@ -1780,10 +2292,48 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let total_width = viz_width as f64 + text_width + cluster_bar_width;
     let total_height = path_space + edge_height;
 
+    // Load colorbrewer palette if specified (SVG)
+    let depth_palette: Option<&[(u8, u8, u8)]> = args.colorbrewer_palette.as_ref().and_then(|arg| {
+        if let Some((scheme, _n)) = parse_colorbrewer_arg(arg) {
+            get_colorbrewer_palette(&scheme).or_else(|| {
+                eprintln!("[gfalook] warning: unknown colorbrewer palette '{}', using default Spectral", scheme);
+                None
+            })
+        } else {
+            eprintln!("[gfalook] warning: invalid colorbrewer palette format '{}', expected SCHEME:N", arg);
+            None
+        }
+    });
+
     let custom_colors: Option<FxHashMap<String, (u8, u8, u8)>> = args
         .path_colors
         .as_ref()
         .and_then(|p| load_path_colors(p).ok());
+
+    // Load highlight node IDs if specified
+    let highlight_nodes: Option<FxHashSet<u64>> = args
+        .highlight_node_ids
+        .as_ref()
+        .and_then(|p| load_highlight_node_ids(p).ok());
+
+    // Track which groups have already been rendered (for path names)
+    let mut rendered_groups: FxHashSet<i64> = FxHashSet::default();
+
+    // Calculate max path length for longest-path option
+    let max_path_length: u64 = if args.longest_path || args.change_darkness {
+        display_paths.iter().map(|path| {
+            path.steps.iter().map(|step| {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    graph.segments[seg_id].sequence_len
+                } else {
+                    0
+                }
+            }).sum::<u64>()
+        }).max().unwrap_or(1)
+    } else {
+        1
+    };
 
     let mut svg = String::new();
 
@@ -1802,12 +2352,28 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Track max_y for edge rendering
     let mut max_y: f64 = path_space as f64;
 
-    // Render each path
+    // Render each path (SVG)
     let mut prev_cluster_id: Option<usize> = None;
     let mut cumulative_gap: f64 = 0.0;
     let cluster_gap = args.cluster_gap as f64;
 
     for (path_idx, path) in display_paths.iter().enumerate() {
+        // Check if grouping is enabled and get group index
+        let (row_idx, display_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
+            let group_idx = pg.path_to_group[path_idx];
+            if group_idx < 0 {
+                // Skip paths that don't match any prefix
+                continue;
+            }
+            let first = !rendered_groups.contains(&group_idx);
+            if first {
+                rendered_groups.insert(group_idx);
+            }
+            (group_idx as u32, pg.prefixes[group_idx as usize].as_str(), first)
+        } else {
+            (path_idx as u32, path.name.as_str(), true)
+        };
+
         // Add gap before new cluster (except first)
         if let Some(ref cr) = cluster_result {
             let cluster_id = cr.cluster_ids[path_idx];
@@ -1817,18 +2383,19 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             prev_cluster_id = Some(cluster_id);
         }
 
-        let path_y = path_idx as u32;
-        let y_start = (path_y * pix_per_path) as f64 + cumulative_gap;
+        let y_start = (row_idx * pix_per_path) as f64 + cumulative_gap;
 
-        // Render cluster indicator bar on the left
-        if let Some(ref cr) = cluster_result {
-            let cluster_id = cr.cluster_ids[path_idx];
-            let (cr, cg, cb) = get_cluster_color(cluster_id);
-            svg.push_str(&format!(
-                r#"<rect x="0" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                y_start, cluster_bar_width, pix_per_path, cr, cg, cb
-            ));
-            svg.push('\n');
+        // Render cluster indicator bar on the left (only for first path in group)
+        if is_first_in_group {
+            if let Some(ref cr) = cluster_result {
+                let cluster_id = cr.cluster_ids[path_idx];
+                let (cr, cg, cb) = get_cluster_color(cluster_id);
+                svg.push_str(&format!(
+                    r#"<rect x="0" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                    y_start, cluster_bar_width, pix_per_path, cr, cg, cb
+                ));
+                svg.push('\n');
+            }
         }
 
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
@@ -1838,8 +2405,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             compute_path_color(&path.name, args.color_by_prefix)
         };
 
-        // Render path name (full name, vector font)
-        if !args.hide_path_names {
+        // Render path name (full name, vector font) - only once per group
+        if is_first_in_group && !args.hide_path_names {
             let text_y = y_start + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
             let text_color = if args.color_path_names_background {
                 // White text on colored background
@@ -1854,19 +2421,39 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             };
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="{}">{}</text>"#,
-                cluster_bar_width + 5.0, text_y, text_color, escape_xml(&path.name)
+                cluster_bar_width + 5.0, text_y, text_color, escape_xml(display_name)
             ));
             svg.push('\n');
         }
 
-        // Compute bins for this path
+        // Compute bins for this path (SVG rendering)
         let mut bins: FxHashMap<usize, BinInfo> = FxHashMap::default();
 
+        // Calculate current path length for darkness gradient
+        let path_length: u64 = path.steps.iter().map(|step| {
+            let seg_id = step.segment_id as usize;
+            if seg_id < graph.segments.len() {
+                graph.segments[seg_id].sequence_len
+            } else {
+                0
+            }
+        }).sum();
+        let darkness_length = if args.longest_path { max_path_length } else { path_length };
+
+        let mut path_pos: u64 = 0; // Track position within path
         for step in &path.steps {
             let seg_id = step.segment_id as usize;
             if seg_id < graph.segments.len() {
                 let offset = graph.segment_offsets[seg_id];
                 let seg_len = graph.segments[seg_id].sequence_len;
+                let n_count = graph.segments[seg_id].n_count;
+                // Proportion of N's in this segment (for uncalled base coloring)
+                let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
+
+                // Check if this segment is highlighted
+                let is_highlighted = highlight_nodes
+                    .as_ref()
+                    .map_or(false, |hn| hn.contains(&step.segment_id));
 
                 for k in 0..seg_len {
                     let pos = offset + k;
@@ -1876,12 +2463,22 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     if step.is_reverse {
                         entry.mean_inv += 1.0;
                     }
+                    entry.mean_pos += path_pos as f64;
+                    entry.mean_uncalled += n_proportion;
+                    if is_highlighted {
+                        entry.highlighted = true;
+                    }
+                    path_pos += 1;
                 }
             }
         }
 
-        // Normalize bin values
+        // Normalize bin values (SVG)
         for (_, v) in bins.iter_mut() {
+            if v.mean_depth > 0.0 {
+                v.mean_pos /= v.mean_depth;
+                v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
+            }
             v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
             v.mean_depth /= bin_width;
         }
@@ -1899,19 +2496,69 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
         // Helper to get color for a bin
         let get_bin_color = |bin_info: &BinInfo| -> (u8, u8, u8) {
-            if args.color_by_mean_depth {
-                get_depth_color(bin_info.mean_depth)
+            let (r, g, b) = if highlight_nodes.is_some() {
+                // Highlighting mode: red for highlighted bins, grey for others
+                if bin_info.highlighted {
+                    (255, 0, 0)
+                } else {
+                    (180, 180, 180)
+                }
+            } else if args.color_by_mean_depth {
+                get_depth_color(bin_info.mean_depth, args.no_grey_depth, depth_palette)
             } else if args.color_by_mean_inversion_rate {
                 let inv_r = (bin_info.mean_inv * 255.0).min(255.0) as u8;
                 (inv_r, 0, 0)
+            } else if args.color_by_uncalled_bases {
+                // Black to green gradient based on proportion of uncalled bases (N's)
+                let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
+                (0, green, 0)
             } else if args.show_strand {
-                if bin_info.mean_inv > 0.5 {
-                    (200, 50, 50)
+                // Check if alignment_prefix applies
+                let apply_strand = args.alignment_prefix
+                    .as_ref()
+                    .map_or(true, |prefix| path.name.starts_with(prefix));
+
+                if apply_strand {
+                    if bin_info.mean_inv > 0.5 {
+                        (200, 50, 50)
+                    } else {
+                        (50, 50, 200)
+                    }
                 } else {
-                    (50, 50, 200)
+                    (path_r, path_g, path_b)
                 }
             } else {
                 (path_r, path_g, path_b)
+            };
+
+            // Apply darkness gradient if enabled
+            if args.change_darkness && !highlight_nodes.is_some() {
+                let apply_darkness = args.alignment_prefix
+                    .as_ref()
+                    .map_or(true, |prefix| path.name.starts_with(prefix));
+
+                if apply_darkness && darkness_length > 0 {
+                    let pos_factor = bin_info.mean_pos / darkness_length as f64;
+                    let darkness = if bin_info.mean_inv > 0.5 {
+                        1.0 - pos_factor
+                    } else {
+                        pos_factor
+                    };
+
+                    if args.white_to_black {
+                        let gray = (255.0 * (1.0 - darkness)).round() as u8;
+                        (gray, gray, gray)
+                    } else {
+                        let factor = 1.0 - (darkness * 0.8);
+                        ((r as f64 * factor).round() as u8,
+                         (g as f64 * factor).round() as u8,
+                         (b as f64 * factor).round() as u8)
+                    }
+                } else {
+                    (r, g, b)
+                }
+            } else {
+                (r, g, b)
             }
         };
 
@@ -1963,6 +2610,37 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 cluster_bar_width + text_width, border_y, total_width, border_y, border_color
             ));
             svg.push('\n');
+        }
+
+        // Draw link lines between discontinuous path pieces
+        if let Some(link_width) = args.link_path_pieces {
+            let mut sorted_bins: Vec<usize> = bins.keys().copied().collect();
+            sorted_bins.sort();
+
+            if sorted_bins.len() > 1 {
+                let link_height = (pix_per_path as f64 * link_width).max(1.0);
+                let link_y = y_start + (pix_per_path as f64 / 2.0) - (link_height / 2.0);
+
+                for i in 1..sorted_bins.len() {
+                    let prev_bin = sorted_bins[i - 1];
+                    let curr_bin = sorted_bins[i];
+
+                    // If there's a gap between bins, draw a connecting line
+                    if curr_bin > prev_bin + 1 {
+                        let x_start = cluster_bar_width + text_width + (prev_bin as f64 + 1.0).min((viz_width - 1) as f64);
+                        let x_end = cluster_bar_width + text_width + (curr_bin as f64).min((viz_width - 1) as f64);
+                        let line_width = x_end - x_start;
+
+                        if line_width > 0.0 {
+                            svg.push_str(&format!(
+                                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                                x_start, link_y, line_width, link_height, path_r, path_g, path_b
+                            ));
+                            svg.push('\n');
+                        }
+                    }
+                }
+            }
         }
     }
 
