@@ -85,7 +85,7 @@ struct Args {
     black_path_borders: bool,
 
     /// Pack all paths rather than displaying a single path per row.
-    #[arg(short = 'R', long = "pack-paths", help_heading = "Path Appearance")]
+    #[arg(short = 'R', long = "pack-paths", conflicts_with_all = ["paths_to_display", "compressed_mode", "prefix_merges", "cluster_paths"], help_heading = "Path Appearance")]
     pack_paths: bool,
 
     /// Show thin links of this relative width to connect path pieces.
@@ -170,7 +170,7 @@ struct Args {
 
     // === Special Modes ===
     /// Compress the view vertically, summarizing path coverage.
-    #[arg(short = 'O', long = "compressed-mode", help_heading = "Special Modes")]
+    #[arg(short = 'O', long = "compressed-mode", conflicts_with_all = ["cluster_paths", "prefix_merges"], help_heading = "Special Modes")]
     compressed_mode: bool,
 
     /// Apply alignment related visual motifs to paths which have this name prefix.
@@ -1448,6 +1448,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         eprintln!("[gfalook] error: -k/--cluster-paths cannot be used with -M/--prefix-merges.");
         std::process::exit(1);
     }
+    // Note: compressed_mode conflicts with cluster_paths and prefix_merges are handled by clap
 
     let mut display_paths: Vec<&GfaPath> = graph.paths.iter().collect();
 
@@ -1512,8 +1513,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
     });
 
-    // Effective row count: use num_groups if grouping is enabled
-    let effective_row_count = if let Some(ref pg) = path_grouping {
+    // Effective row count: use num_groups if grouping is enabled, 1 if compressed mode
+    let effective_row_count = if args.compressed_mode {
+        1
+    } else if let Some(ref pg) = path_grouping {
         pg.num_groups as u32
     } else {
         path_count
@@ -1523,8 +1526,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     debug!("bin width: {:.2e}", bin_width);
     debug!("image width: {}", viz_width);
 
-    // Use prefix names for max_name_len when grouping
-    let max_name_len = if let Some(ref pg) = path_grouping {
+    // Use prefix names for max_name_len when grouping, "COMPRESSED_MODE" for compressed mode
+    let max_name_len = if args.compressed_mode {
+        "COMPRESSED_MODE".len()
+    } else if let Some(ref pg) = path_grouping {
         pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
     } else {
         display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
@@ -1535,7 +1540,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     // Cluster bar width (only if clustering is enabled)
     let cluster_bar_width: u32 = if cluster_result.is_some() { 10 } else { 0 };
 
-    let text_only_width = if args.hide_path_names {
+    // Disable path names when pack_paths is enabled (they wouldn't make sense)
+    let text_only_width = if args.hide_path_names || args.pack_paths {
         0u32
     } else if pix_per_path >= 8 {
         (max_num_of_chars as u32 * char_size) + char_size / 2
@@ -1614,12 +1620,281 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         1
     };
 
-    // Render each path (PNG)
+    // Compressed mode: aggregate bins across all paths and render single row (PNG)
+    if args.compressed_mode {
+        // Use RdBu palette by default for compressed mode, or user-specified palette
+        let compressed_palette = depth_palette.unwrap_or(COLORBREWER_RDBU_11.as_slice());
+
+        // Aggregate bins across all paths
+        let mut aggregated_bins: FxHashMap<usize, (f64, u32)> = FxHashMap::default(); // (sum_depth, count)
+
+        for path in display_paths.iter() {
+            for step in &path.steps {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    let offset = graph.segment_offsets[seg_id];
+                    let seg_len = graph.segments[seg_id].sequence_len;
+
+                    for k in 0..seg_len {
+                        let pos = offset + k;
+                        let curr_bin = (pos as f64 / bin_width) as usize;
+                        let entry = aggregated_bins.entry(curr_bin).or_insert((0.0, 0));
+                        entry.0 += 1.0; // Add depth contribution
+                        entry.1 += 1; // Count paths covering this position
+                    }
+                }
+            }
+        }
+
+        // Normalize aggregated bins to get mean depth across all paths
+        let num_paths = display_paths.len() as f64;
+        let mut compressed_bins: FxHashMap<usize, f64> = FxHashMap::default();
+        for (bin_idx, (sum_depth, _count)) in aggregated_bins.iter() {
+            // Normalize: divide by bin_width to get depth, then by num_paths for mean
+            let mean_depth = sum_depth / bin_width / num_paths;
+            compressed_bins.insert(*bin_idx, mean_depth);
+        }
+
+        // Render path name "COMPRESSED_MODE"
+        let y_start = 0u32;
+        if text_only_width > 0 && pix_per_path >= 8 {
+            let display_name = "COMPRESSED_MODE";
+            let num_of_chars = display_name.len().min(max_num_of_chars);
+            let left_padding = max_num_of_chars - num_of_chars;
+
+            let base_y = y_start + pix_per_path / 2 - char_size / 2;
+            for (i, c) in display_name.chars().take(num_of_chars).enumerate() {
+                let base_x = (left_padding + i) as u32 * char_size + 3 + cluster_bar_width;
+                let c_byte = c as usize;
+                let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
+                write_char(&mut path_names_buffer, path_names_width, base_x, base_y, char_data, char_size, 0, 0, 0);
+            }
+        }
+
+        // Render aggregated bins
+        for (bin_idx, mean_depth) in &compressed_bins {
+            let x = (*bin_idx as u32).min(viz_width - 1);
+            let (r, g, b) = get_depth_color(*mean_depth, args.no_grey_depth, Some(compressed_palette));
+            add_path_step(&mut buffer, total_width, x + path_names_width, y_start, pix_per_path,
+                r, g, b, args.no_path_borders, args.black_path_borders);
+        }
+    }
+
+    // Pack-paths mode: use 2D collision detection to pack paths compactly (PNG)
+    if args.pack_paths && !args.compressed_mode {
+        // Pre-compute bins for all paths to determine their X ranges
+        struct PathBinData {
+            min_bin: usize,
+            max_bin: usize,
+            bins: FxHashMap<usize, BinInfo>,
+            color: (u8, u8, u8),
+        }
+
+        let mut path_data: Vec<PathBinData> = Vec::with_capacity(display_paths.len());
+
+        for path in display_paths.iter() {
+            let mut bins: FxHashMap<usize, BinInfo> = FxHashMap::default();
+            let mut min_bin = usize::MAX;
+            let mut max_bin = 0usize;
+
+            let mut path_pos: u64 = 0;
+            for step in &path.steps {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    let offset = graph.segment_offsets[seg_id];
+                    let seg_len = graph.segments[seg_id].sequence_len;
+                    let n_count = graph.segments[seg_id].n_count;
+                    let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
+                    let is_highlighted = highlight_nodes.as_ref().map_or(false, |hn| hn.contains(&step.segment_id));
+
+                    for k in 0..seg_len {
+                        let pos = offset + k;
+                        let curr_bin = (pos as f64 / bin_width) as usize;
+                        min_bin = min_bin.min(curr_bin);
+                        max_bin = max_bin.max(curr_bin);
+
+                        let entry = bins.entry(curr_bin).or_default();
+                        entry.mean_depth += 1.0;
+                        if step.is_reverse { entry.mean_inv += 1.0; }
+                        entry.mean_pos += path_pos as f64;
+                        entry.mean_uncalled += n_proportion;
+                        if is_highlighted { entry.highlighted = true; }
+                        path_pos += 1;
+                    }
+                }
+            }
+
+            // Normalize bins
+            for (_, v) in bins.iter_mut() {
+                if v.mean_depth > 0.0 {
+                    v.mean_pos /= v.mean_depth;
+                    v.mean_uncalled /= v.mean_depth;
+                }
+                v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
+                v.mean_depth /= bin_width;
+            }
+
+            let color = if let Some(ref colors) = custom_colors {
+                colors.get(&path.name).copied().unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
+            } else {
+                compute_path_color(&path.name, args.color_by_prefix)
+            };
+
+            path_data.push(PathBinData { min_bin, max_bin, bins, color });
+        }
+
+        // Layout buffer: for each X position, track the lowest available row
+        // Using a simple greedy approach: for each path, find first row where it fits
+        let mut occupancy: Vec<Vec<bool>> = vec![vec![false; viz_width as usize]; 1]; // Start with 1 row
+
+        // Assign Y row to each path
+        let mut path_rows: Vec<usize> = Vec::with_capacity(path_data.len());
+
+        for pd in &path_data {
+            if pd.min_bin == usize::MAX {
+                // Empty path, assign to row 0
+                path_rows.push(0);
+                continue;
+            }
+
+            // Find first row where this path fits
+            let mut found_row = None;
+            for row in 0..occupancy.len() {
+                let mut fits = true;
+                for bin_idx in pd.min_bin..=pd.max_bin.min(viz_width as usize - 1) {
+                    if occupancy[row][bin_idx] {
+                        fits = false;
+                        break;
+                    }
+                }
+                if fits {
+                    found_row = Some(row);
+                    break;
+                }
+            }
+
+            let row = found_row.unwrap_or_else(|| {
+                // Need a new row
+                occupancy.push(vec![false; viz_width as usize]);
+                occupancy.len() - 1
+            });
+
+            // Mark bins as occupied
+            for bin_idx in pd.min_bin..=pd.max_bin.min(viz_width as usize - 1) {
+                occupancy[row][bin_idx] = true;
+            }
+
+            path_rows.push(row);
+        }
+
+        let packed_rows = occupancy.len() as u32;
+        info!("Pack-paths: {} paths packed into {} rows (vs {} original)", display_paths.len(), packed_rows, path_count);
+
+        // Resize buffer if packed height is different
+        let packed_path_space = packed_rows * pix_per_path;
+        let packed_total_height = packed_path_space + max_axis_height + edge_height;
+        if packed_total_height != max_possible_height {
+            buffer = vec![255u8; (total_width * packed_total_height * 4) as usize];
+            max_y = packed_path_space + max_axis_height;
+        }
+
+        // Render each path at its packed Y position
+        for (path_idx, (pd, path)) in path_data.iter().zip(display_paths.iter()).enumerate() {
+            let y_start = path_rows[path_idx] as u32 * pix_per_path;
+            let (path_r, path_g, path_b) = pd.color;
+            let path_length: u64 = path.steps.iter().map(|step| {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() { graph.segments[seg_id].sequence_len } else { 0 }
+            }).sum();
+            let darkness_length = if args.longest_path { max_path_length } else { path_length };
+
+            for (bin_idx, bin_info) in &pd.bins {
+                let x = (*bin_idx as u32).min(viz_width - 1);
+
+                // Determine color (same logic as normal rendering)
+                let (r, g, b) = if highlight_nodes.is_some() {
+                    if bin_info.highlighted { (255, 0, 0) } else { (180, 180, 180) }
+                } else if args.color_by_mean_depth {
+                    get_depth_color(bin_info.mean_depth, args.no_grey_depth, depth_palette)
+                } else if args.color_by_mean_inversion_rate {
+                    let inv_r = (bin_info.mean_inv * 255.0).min(255.0) as u8;
+                    (inv_r, 0, 0)
+                } else if args.color_by_uncalled_bases {
+                    let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
+                    (0, green, 0)
+                } else if args.show_strand {
+                    let apply_strand = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                    if apply_strand {
+                        if bin_info.mean_inv > 0.5 { (200, 50, 50) } else { (50, 50, 200) }
+                    } else { (path_r, path_g, path_b) }
+                } else { (path_r, path_g, path_b) };
+
+                // Apply darkness gradient if enabled
+                let (r, g, b) = if args.change_darkness && !highlight_nodes.is_some() {
+                    let apply_darkness = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                    if apply_darkness && darkness_length > 0 {
+                        let pos_factor = bin_info.mean_pos / darkness_length as f64;
+                        let darkness = if bin_info.mean_inv > 0.5 { 1.0 - pos_factor } else { pos_factor };
+                        if args.white_to_black {
+                            let gray = (255.0 * (1.0 - darkness)).round() as u8;
+                            (gray, gray, gray)
+                        } else {
+                            let factor = 1.0 - (darkness * 0.8);
+                            ((r as f64 * factor).round() as u8, (g as f64 * factor).round() as u8, (b as f64 * factor).round() as u8)
+                        }
+                    } else { (r, g, b) }
+                } else { (r, g, b) };
+
+                add_path_step(&mut buffer, total_width, x + path_names_width, y_start, pix_per_path,
+                    r, g, b, args.no_path_borders, args.black_path_borders);
+            }
+
+            // Draw link lines between discontinuous path pieces
+            if let Some(link_width) = args.link_path_pieces {
+                let mut sorted_bins: Vec<usize> = pd.bins.keys().copied().collect();
+                sorted_bins.sort();
+
+                if sorted_bins.len() > 1 {
+                    let link_height = ((pix_per_path as f64 * link_width).round() as u32).max(1);
+                    let link_y = y_start + pix_per_path / 2 - link_height / 2;
+
+                    for i in 1..sorted_bins.len() {
+                        let prev_bin = sorted_bins[i - 1];
+                        let curr_bin = sorted_bins[i];
+
+                        if curr_bin > prev_bin + 1 {
+                            let x_start = (prev_bin as u32 + 1).min(viz_width - 1) + path_names_width;
+                            let x_end = (curr_bin as u32).min(viz_width - 1) + path_names_width;
+
+                            for lx in x_start..x_end {
+                                for dy in 0..link_height {
+                                    let y = link_y + dy;
+                                    let idx = ((y * total_width + lx) * 4) as usize;
+                                    if idx + 3 < buffer.len() {
+                                        buffer[idx] = path_r;
+                                        buffer[idx + 1] = path_g;
+                                        buffer[idx + 2] = path_b;
+                                        buffer[idx + 3] = 255;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Render each path (PNG) - skip if compressed mode or pack_paths mode
     let mut prev_cluster_id: Option<usize> = None;
     let mut cumulative_gap: u32 = 0;
     let cluster_gap = args.cluster_gap;
 
     for (path_idx, path) in display_paths.iter().enumerate() {
+        // Skip normal rendering in compressed mode or pack_paths mode
+        if args.compressed_mode || args.pack_paths {
+            break;
+        }
         // Check if grouping is enabled and get group index
         let (row_idx, display_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
             let group_idx = pg.path_to_group[path_idx];
@@ -2270,22 +2545,27 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
     });
 
-    // Effective row count: use num_groups if grouping is enabled
-    let effective_row_count = if let Some(ref pg) = path_grouping {
+    // Effective row count: use num_groups if grouping is enabled, 1 if compressed mode
+    let effective_row_count = if args.compressed_mode {
+        1
+    } else if let Some(ref pg) = path_grouping {
         pg.num_groups as u32
     } else {
         path_count
     };
 
-    // Calculate text width based on longest path/prefix name
-    let max_name_len = if let Some(ref pg) = path_grouping {
+    // Calculate text width based on longest path/prefix name, "COMPRESSED_MODE" for compressed mode
+    let max_name_len = if args.compressed_mode {
+        "COMPRESSED_MODE".len()
+    } else if let Some(ref pg) = path_grouping {
         pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
     } else {
         display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
     };
     let font_size = (pix_per_path as f64 * 0.8).max(8.0);
     let char_width = font_size * 0.6; // Approximate monospace character width
-    let text_width = if args.hide_path_names {
+    // Disable path names when pack_paths is enabled (they wouldn't make sense)
+    let text_width = if args.hide_path_names || args.pack_paths {
         0.0
     } else {
         (max_name_len as f64 * char_width) + 10.0
@@ -2363,12 +2643,293 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Track max_y for edge rendering
     let mut max_y: f64 = path_space as f64;
 
-    // Render each path (SVG)
+    // Compressed mode: aggregate bins across all paths and render single row (SVG)
+    if args.compressed_mode {
+        // Use RdBu palette by default for compressed mode, or user-specified palette
+        let compressed_palette = depth_palette.unwrap_or(COLORBREWER_RDBU_11.as_slice());
+
+        // Aggregate bins across all paths
+        let mut aggregated_bins: FxHashMap<usize, f64> = FxHashMap::default();
+
+        for path in display_paths.iter() {
+            for step in &path.steps {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    let offset = graph.segment_offsets[seg_id];
+                    let seg_len = graph.segments[seg_id].sequence_len;
+
+                    for k in 0..seg_len {
+                        let pos = offset + k;
+                        let curr_bin = (pos as f64 / bin_width) as usize;
+                        *aggregated_bins.entry(curr_bin).or_insert(0.0) += 1.0;
+                    }
+                }
+            }
+        }
+
+        // Normalize to mean depth
+        let num_paths = display_paths.len() as f64;
+        let compressed_bins: FxHashMap<usize, f64> = aggregated_bins.iter()
+            .map(|(k, v)| (*k, v / bin_width / num_paths))
+            .collect();
+
+        // Render path name "COMPRESSED_MODE"
+        let y_start = 0.0f64;
+        if !args.hide_path_names {
+            let text_y = y_start + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
+            svg.push_str(&format!(
+                r#"<text x="{}" y="{}" class="path-name" fill="black">{}</text>"#,
+                cluster_bar_width + 5.0, text_y, "COMPRESSED_MODE"
+            ));
+            svg.push('\n');
+        }
+
+        // Group consecutive bins with same color for rect merging
+        let mut sorted_bins: Vec<(usize, f64)> = compressed_bins.into_iter().collect();
+        sorted_bins.sort_by_key(|(k, _)| *k);
+
+        let mut prev_x: Option<usize> = None;
+        let mut run_start: usize = 0;
+        let mut run_color: (u8, u8, u8) = (0, 0, 0);
+
+        for (bin_idx, mean_depth) in &sorted_bins {
+            let (r, g, b) = get_depth_color(*mean_depth, args.no_grey_depth, Some(compressed_palette));
+
+            if let Some(px) = prev_x {
+                if *bin_idx == px + 1 && (r, g, b) == run_color {
+                    // Continue the run
+                } else {
+                    // Output the previous run
+                    let x = text_width + cluster_bar_width + run_start as f64;
+                    let width = (px - run_start + 1) as f64;
+                    svg.push_str(&format!(
+                        r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                        x, y_start, width, pix_per_path, run_color.0, run_color.1, run_color.2
+                    ));
+                    svg.push('\n');
+                    // Start new run
+                    run_start = *bin_idx;
+                    run_color = (r, g, b);
+                }
+            } else {
+                // First bin
+                run_start = *bin_idx;
+                run_color = (r, g, b);
+            }
+            prev_x = Some(*bin_idx);
+        }
+        // Output last run
+        if let Some(px) = prev_x {
+            let x = text_width + cluster_bar_width + run_start as f64;
+            let width = (px - run_start + 1) as f64;
+            svg.push_str(&format!(
+                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                x, y_start, width, pix_per_path, run_color.0, run_color.1, run_color.2
+            ));
+            svg.push('\n');
+        }
+    }
+
+    // Pack-paths mode: use 2D collision detection to pack paths compactly (SVG)
+    if args.pack_paths && !args.compressed_mode {
+        // Pre-compute bins for all paths to determine their X ranges
+        struct PathBinDataSvg {
+            min_bin: usize,
+            max_bin: usize,
+            bins: FxHashMap<usize, BinInfo>,
+            color: (u8, u8, u8),
+        }
+
+        let mut path_data: Vec<PathBinDataSvg> = Vec::with_capacity(display_paths.len());
+
+        for path in display_paths.iter() {
+            let mut bins: FxHashMap<usize, BinInfo> = FxHashMap::default();
+            let mut min_bin = usize::MAX;
+            let mut max_bin = 0usize;
+
+            let mut path_pos: u64 = 0;
+            for step in &path.steps {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    let offset = graph.segment_offsets[seg_id];
+                    let seg_len = graph.segments[seg_id].sequence_len;
+                    let n_count = graph.segments[seg_id].n_count;
+                    let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
+                    let is_highlighted = highlight_nodes.as_ref().map_or(false, |hn| hn.contains(&step.segment_id));
+
+                    for k in 0..seg_len {
+                        let pos = offset + k;
+                        let curr_bin = (pos as f64 / bin_width) as usize;
+                        min_bin = min_bin.min(curr_bin);
+                        max_bin = max_bin.max(curr_bin);
+
+                        let entry = bins.entry(curr_bin).or_default();
+                        entry.mean_depth += 1.0;
+                        if step.is_reverse { entry.mean_inv += 1.0; }
+                        entry.mean_pos += path_pos as f64;
+                        entry.mean_uncalled += n_proportion;
+                        if is_highlighted { entry.highlighted = true; }
+                        path_pos += 1;
+                    }
+                }
+            }
+
+            // Normalize bins
+            for (_, v) in bins.iter_mut() {
+                if v.mean_depth > 0.0 {
+                    v.mean_pos /= v.mean_depth;
+                    v.mean_uncalled /= v.mean_depth;
+                }
+                v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
+                v.mean_depth /= bin_width;
+            }
+
+            let color = if let Some(ref colors) = custom_colors {
+                colors.get(&path.name).copied().unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
+            } else {
+                compute_path_color(&path.name, args.color_by_prefix)
+            };
+
+            path_data.push(PathBinDataSvg { min_bin, max_bin, bins, color });
+        }
+
+        // Layout buffer: for each X position, track the lowest available row
+        let mut occupancy: Vec<Vec<bool>> = vec![vec![false; viz_width as usize]; 1];
+        let mut path_rows: Vec<usize> = Vec::with_capacity(path_data.len());
+
+        for pd in &path_data {
+            if pd.min_bin == usize::MAX {
+                path_rows.push(0);
+                continue;
+            }
+
+            let mut found_row = None;
+            for row in 0..occupancy.len() {
+                let mut fits = true;
+                for bin_idx in pd.min_bin..=pd.max_bin.min(viz_width as usize - 1) {
+                    if occupancy[row][bin_idx] {
+                        fits = false;
+                        break;
+                    }
+                }
+                if fits {
+                    found_row = Some(row);
+                    break;
+                }
+            }
+
+            let row = found_row.unwrap_or_else(|| {
+                occupancy.push(vec![false; viz_width as usize]);
+                occupancy.len() - 1
+            });
+
+            for bin_idx in pd.min_bin..=pd.max_bin.min(viz_width as usize - 1) {
+                occupancy[row][bin_idx] = true;
+            }
+
+            path_rows.push(row);
+        }
+
+        let packed_rows = occupancy.len() as u32;
+        let packed_path_space = packed_rows * pix_per_path;
+        max_y = packed_path_space as f64;
+
+        // Render each path at its packed Y position
+        for (path_idx, (pd, path)) in path_data.iter().zip(display_paths.iter()).enumerate() {
+            let y_start = path_rows[path_idx] as f64 * pix_per_path as f64;
+            let (path_r, path_g, path_b) = pd.color;
+            let path_length: u64 = path.steps.iter().map(|step| {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() { graph.segments[seg_id].sequence_len } else { 0 }
+            }).sum();
+            let darkness_length = if args.longest_path { max_path_length } else { path_length };
+
+            // Group bins by color for rect merging
+            let mut sorted_bins: Vec<(usize, &BinInfo)> = pd.bins.iter().map(|(k, v)| (*k, v)).collect();
+            sorted_bins.sort_by_key(|(k, _)| *k);
+
+            let mut prev_x: Option<usize> = None;
+            let mut run_start: usize = 0;
+            let mut run_color: (u8, u8, u8) = (0, 0, 0);
+
+            for (bin_idx, bin_info) in &sorted_bins {
+                // Calculate color
+                let (r, g, b) = if highlight_nodes.is_some() {
+                    if bin_info.highlighted { (255, 0, 0) } else { (180, 180, 180) }
+                } else if args.color_by_mean_depth {
+                    get_depth_color(bin_info.mean_depth, args.no_grey_depth, depth_palette)
+                } else if args.color_by_mean_inversion_rate {
+                    let inv_r = (bin_info.mean_inv * 255.0).min(255.0) as u8;
+                    (inv_r, 0, 0)
+                } else if args.color_by_uncalled_bases {
+                    let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
+                    (0, green, 0)
+                } else if args.show_strand {
+                    let apply_strand = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                    if apply_strand {
+                        if bin_info.mean_inv > 0.5 { (200, 50, 50) } else { (50, 50, 200) }
+                    } else { (path_r, path_g, path_b) }
+                } else { (path_r, path_g, path_b) };
+
+                let (r, g, b) = if args.change_darkness && !highlight_nodes.is_some() {
+                    let apply_darkness = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                    if apply_darkness && darkness_length > 0 {
+                        let pos_factor = bin_info.mean_pos / darkness_length as f64;
+                        let darkness = if bin_info.mean_inv > 0.5 { 1.0 - pos_factor } else { pos_factor };
+                        if args.white_to_black {
+                            let gray = (255.0 * (1.0 - darkness)).round() as u8;
+                            (gray, gray, gray)
+                        } else {
+                            let factor = 1.0 - (darkness * 0.8);
+                            ((r as f64 * factor).round() as u8, (g as f64 * factor).round() as u8, (b as f64 * factor).round() as u8)
+                        }
+                    } else { (r, g, b) }
+                } else { (r, g, b) };
+
+                if let Some(px) = prev_x {
+                    if *bin_idx == px + 1 && (r, g, b) == run_color {
+                        // Continue run
+                    } else {
+                        // Output run
+                        let x = text_width + cluster_bar_width + run_start as f64;
+                        let width = (px - run_start + 1) as f64;
+                        svg.push_str(&format!(
+                            r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                            x, y_start, width, pix_per_path, run_color.0, run_color.1, run_color.2
+                        ));
+                        svg.push('\n');
+                        run_start = *bin_idx;
+                        run_color = (r, g, b);
+                    }
+                } else {
+                    run_start = *bin_idx;
+                    run_color = (r, g, b);
+                }
+                prev_x = Some(*bin_idx);
+            }
+            // Output last run
+            if let Some(px) = prev_x {
+                let x = text_width + cluster_bar_width + run_start as f64;
+                let width = (px - run_start + 1) as f64;
+                svg.push_str(&format!(
+                    r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                    x, y_start, width, pix_per_path, run_color.0, run_color.1, run_color.2
+                ));
+                svg.push('\n');
+            }
+        }
+    }
+
+    // Render each path (SVG) - skip if compressed mode or pack_paths mode
     let mut prev_cluster_id: Option<usize> = None;
     let mut cumulative_gap: f64 = 0.0;
     let cluster_gap = args.cluster_gap as f64;
 
     for (path_idx, path) in display_paths.iter().enumerate() {
+        // Skip normal rendering in compressed mode or pack_paths mode
+        if args.compressed_mode || args.pack_paths {
+            break;
+        }
         // Check if grouping is enabled and get group index
         let (row_idx, display_name, is_first_in_group) = if let Some(ref pg) = path_grouping {
             let group_idx = pg.path_to_group[path_idx];
