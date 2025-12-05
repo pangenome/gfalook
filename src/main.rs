@@ -358,6 +358,25 @@ const COLORBREWER_SPECTRAL_13: [(u8, u8, u8); 13] = [
     (94, 79, 162),
 ];
 
+/// ColorBrewer Set1 qualitative palette for cluster indicators
+/// 9 distinct colors that are easy to distinguish
+const CLUSTER_COLORS: [(u8, u8, u8); 9] = [
+    (228, 26, 28),   // red
+    (55, 126, 184),  // blue
+    (77, 175, 74),   // green
+    (152, 78, 163),  // purple
+    (255, 127, 0),   // orange
+    (255, 255, 51),  // yellow
+    (166, 86, 40),   // brown
+    (247, 129, 191), // pink
+    (153, 153, 153), // grey
+];
+
+/// Get color for a cluster ID
+fn get_cluster_color(cluster_id: usize) -> (u8, u8, u8) {
+    CLUSTER_COLORS[cluster_id % CLUSTER_COLORS.len()]
+}
+
 /// Parse a GFA file efficiently
 fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
     let mut graph = Graph::new();
@@ -1175,13 +1194,19 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let max_num_of_chars = args.max_num_of_characters.unwrap_or(max_name_len.min(128));
     let char_size = ((pix_per_path / 8) * 8).min(64).max(8);
 
-    let path_names_width = if args.hide_path_names {
+    // Cluster bar width (only if clustering is enabled)
+    let cluster_bar_width: u32 = if cluster_result.is_some() { 10 } else { 0 };
+
+    let text_only_width = if args.hide_path_names {
         0u32
     } else if pix_per_path >= 8 {
         (max_num_of_chars as u32 * char_size) + char_size / 2
     } else {
         0
     };
+
+    // Total left panel width includes cluster bar + path names
+    let path_names_width = text_only_width + cluster_bar_width;
 
     let path_space = path_count * pix_per_path + total_gap;
 
@@ -1228,6 +1253,16 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
         let y_start = path_idx as u32 * pix_per_path + cumulative_gap;
 
+        // Render cluster indicator bar on the left
+        if let Some(ref cr) = cluster_result {
+            let cluster_id = cr.cluster_ids[path_idx];
+            let (cr_r, cr_g, cr_b) = get_cluster_color(cluster_id);
+            for x in 0..cluster_bar_width {
+                add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
+                    cr_r, cr_g, cr_b, true, false); // no border for cluster bar
+            }
+        }
+
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
             colors.get(&path.name).copied()
                 .unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
@@ -1236,13 +1271,13 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         };
 
         // Render path name
-        if path_names_width > 0 && pix_per_path >= 8 {
+        if text_only_width > 0 && pix_per_path >= 8 {
             let num_of_chars = path.name.len().min(max_num_of_chars);
             let path_name_too_long = path.name.len() > num_of_chars;
             let left_padding = max_num_of_chars - num_of_chars;
 
             if args.color_path_names_background {
-                for x in (left_padding as u32 * char_size)..path_names_width {
+                for x in (left_padding as u32 * char_size + cluster_bar_width)..path_names_width {
                     add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
                         path_r, path_g, path_b, args.no_path_borders, args.black_path_borders);
                 }
@@ -1250,8 +1285,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             let base_y = y_start + pix_per_path / 2 - char_size / 2;
             for (i, c) in path.name.chars().take(num_of_chars).enumerate() {
-                // +3 offset to match odgi's text positioning
-                let base_x = (left_padding + i) as u32 * char_size + 3;
+                // +3 offset to match odgi's text positioning, shifted by cluster_bar_width
+                let base_x = (left_padding + i) as u32 * char_size + 3 + cluster_bar_width;
                 let char_data = if i == num_of_chars - 1 && path_name_too_long {
                     &TRAILING_DOTS
                 } else {
@@ -1478,13 +1513,16 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         (max_name_len as f64 * char_width) + 10.0
     };
 
+    // Cluster bar width (only if clustering is enabled)
+    let cluster_bar_width = if cluster_result.is_some() { 10.0 } else { 0.0 };
+
     let path_space = path_count * pix_per_path;
     let bottom_padding = 5u32;
     let height_param = (args.height + bottom_padding) as u64;
     let edge_height = (len_to_visualize.min(height_param)) as u32;
     let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
 
-    let total_width = viz_width as f64 + text_width;
+    let total_width = viz_width as f64 + text_width + cluster_bar_width;
     let total_height = path_space + edge_height;
 
     let custom_colors: Option<FxHashMap<String, (u8, u8, u8)>> = args
@@ -1527,6 +1565,17 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let path_y = path_idx as u32;
         let y_start = (path_y * pix_per_path) as f64 + cumulative_gap;
 
+        // Render cluster indicator bar on the left
+        if let Some(ref cr) = cluster_result {
+            let cluster_id = cr.cluster_ids[path_idx];
+            let (cr, cg, cb) = get_cluster_color(cluster_id);
+            svg.push_str(&format!(
+                r#"<rect x="0" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                y_start, cluster_bar_width, pix_per_path, cr, cg, cb
+            ));
+            svg.push('\n');
+        }
+
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
             colors.get(&path.name).copied()
                 .unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
@@ -1540,8 +1589,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let text_color = if args.color_path_names_background {
                 // White text on colored background
                 svg.push_str(&format!(
-                    r#"<rect x="0" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                    y_start, text_width, pix_per_path, path_r, path_g, path_b
+                    r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                    cluster_bar_width, y_start, text_width, pix_per_path, path_r, path_g, path_b
                 ));
                 svg.push('\n');
                 "white"
@@ -1549,8 +1598,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 "black"
             };
             svg.push_str(&format!(
-                r#"<text x="5" y="{}" class="path-name" fill="{}">{}</text>"#,
-                text_y, text_color, escape_xml(&path.name)
+                r#"<text x="{}" y="{}" class="path-name" fill="{}">{}</text>"#,
+                cluster_bar_width + 5.0, text_y, text_color, escape_xml(&path.name)
             ));
             svg.push('\n');
         }
@@ -1625,7 +1674,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     run_end = bin_idx;
                 } else {
                     // Output the previous run
-                    let x = text_width + (run_start as f64).min((viz_width - 1) as f64);
+                    let x = cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
                     let width = (run_end - run_start + 1) as f64;
                     svg.push_str(&format!(
                         r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -1641,7 +1690,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
 
             // Output the final run
-            let x = text_width + (run_start as f64).min((viz_width - 1) as f64);
+            let x = cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
             let width = (run_end - run_start + 1) as f64;
             svg.push_str(&format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -1656,7 +1705,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let border_color = if args.black_path_borders { "black" } else { "white" };
             svg.push_str(&format!(
                 r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>"#,
-                text_width, border_y, total_width, border_y, border_color
+                cluster_bar_width + text_width, border_y, total_width, border_y, border_color
             ));
             svg.push('\n');
         }
@@ -1692,8 +1741,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let dist = ((b - a) * bin_width) as f64;
             let h = (dist * scale_y_edges).min(edge_height as f64 - 1.0);
 
-            let ax = text_width + a.round();
-            let bx = text_width + b.round();
+            let ax = cluster_bar_width + text_width + a.round();
+            let bx = cluster_bar_width + text_width + b.round();
             let base_y = path_space_with_gap;
 
             // Skip degenerate edges (zero height and minimal width - not visible)
