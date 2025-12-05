@@ -59,6 +59,12 @@ With depth coloring:
 gfalook -i graph.gfa -o graph.png -m -P
 ```
 
+## Citation
+
+Based on the `viz` command from [ODGI](https://github.com/pangenome/odgi):
+
+> Guarracino A, Heumos S, Naber F, Panber P, Kelleher J, Garrison E. ODGI: understanding pangenome graphs. *Bioinformatics*. 2022;38(13):3319-3326. https://doi.org/10.1093/bioinformatics/btac308
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
