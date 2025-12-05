@@ -1,7 +1,7 @@
 use clap::Parser;
 use log::{debug, info};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -80,6 +80,18 @@ struct Args {
     /// Automatically order paths by similarity.
     #[arg(short = 'k', long = "cluster-paths", conflicts_with = "paths_to_display")]
     cluster_paths: bool,
+
+    /// Similarity threshold for cluster detection (automatic if not specified).
+    #[arg(long = "cluster-threshold", value_name = "F", requires = "cluster_paths")]
+    cluster_threshold: Option<f64>,
+
+    /// Use all nodes for clustering instead of only variable nodes.
+    #[arg(long = "cluster-all-nodes", requires = "cluster_paths")]
+    cluster_all_nodes: bool,
+
+    /// Gap in pixels between clusters.
+    #[arg(long = "cluster-gap", value_name = "N", requires = "cluster_paths", default_value_t = 10)]
+    cluster_gap: u32,
 
     /// Color nodes listed in FILE in red and all other nodes in grey.
     #[arg(short = 'J', long = "highlight-node-ids", value_name = "FILE")]
@@ -593,25 +605,175 @@ fn load_paths_to_display(path: &PathBuf) -> std::io::Result<Vec<String>> {
     Ok(paths)
 }
 
-/// Compute Jaccard similarity between two sorted bin vectors
-fn jaccard_similarity(a: &[u64], b: &[u64]) -> f64 {
-    let mut i = 0;
-    let mut j = 0;
-    let mut intersection = 0;
+/// Result of path clustering
+struct ClusteringResult {
+    ordering: Vec<usize>,
+    cluster_ids: Vec<usize>,
+    num_clusters: usize,
+}
 
-    while i < a.len() && j < b.len() {
-        if a[i] == b[j] {
-            intersection += 1;
-            i += 1;
-            j += 1;
-        } else if a[i] < b[j] {
-            i += 1;
-        } else {
-            j += 1;
+/// Union-Find data structure for DBSCAN clustering
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<usize>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        UnionFind {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
         }
     }
 
-    let union = a.len() + b.len() - intersection;
+    fn find(&mut self, x: usize) -> usize {
+        if self.parent[x] != x {
+            self.parent[x] = self.find(self.parent[x]); // Path compression
+        }
+        self.parent[x]
+    }
+
+    fn union(&mut self, x: usize, y: usize) {
+        let px = self.find(x);
+        let py = self.find(y);
+        if px != py {
+            // Union by rank
+            if self.rank[px] < self.rank[py] {
+                self.parent[px] = py;
+            } else if self.rank[px] > self.rank[py] {
+                self.parent[py] = px;
+            } else {
+                self.parent[py] = px;
+                self.rank[px] += 1;
+            }
+        }
+    }
+
+    fn count_clusters(&mut self) -> usize {
+        let n = self.parent.len();
+        let mut roots: FxHashSet<usize> = FxHashSet::default();
+        for i in 0..n {
+            roots.insert(self.find(i));
+        }
+        roots.len()
+    }
+}
+
+/// Run DBSCAN with minPts=1 on distance matrix, return number of clusters
+/// With minPts=1, DBSCAN is equivalent to finding connected components
+/// where edges exist for distance <= eps
+fn dbscan_count_clusters(dist_matrix: &[Vec<f64>], eps: f64) -> usize {
+    let n = dist_matrix.len();
+    if n == 0 {
+        return 0;
+    }
+
+    let mut uf = UnionFind::new(n);
+
+    // Connect points within eps distance
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if dist_matrix[i][j] <= eps {
+                uf.union(i, j);
+            }
+        }
+    }
+
+    uf.count_clusters()
+}
+
+/// Run DBSCAN with minPts=1, return cluster assignments
+fn dbscan_cluster(dist_matrix: &[Vec<f64>], eps: f64) -> Vec<usize> {
+    let n = dist_matrix.len();
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut uf = UnionFind::new(n);
+
+    // Connect points within eps distance
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if dist_matrix[i][j] <= eps {
+                uf.union(i, j);
+            }
+        }
+    }
+
+    // Assign cluster IDs (0-indexed, consecutive)
+    let mut root_to_cluster: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut cluster_ids = Vec::with_capacity(n);
+    let mut next_cluster = 0;
+
+    for i in 0..n {
+        let root = uf.find(i);
+        let cluster = *root_to_cluster.entry(root).or_insert_with(|| {
+            let c = next_cluster;
+            next_cluster += 1;
+            c
+        });
+        cluster_ids.push(cluster);
+    }
+
+    cluster_ids
+}
+
+/// Find optimal eps using cosigt's stabilization detection
+/// Tests eps from 0.01 to 0.30, finds where cluster count stabilizes
+fn find_optimal_eps(dist_matrix: &[Vec<f64>], n_paths: usize) -> f64 {
+    if dist_matrix.is_empty() {
+        return 0.30;
+    }
+
+    // cosigt: pclust <- length(table(dbscan(distanceMatrix, eps = 0, minPts = 1)$cluster))
+    let mut prev_clusters = dbscan_count_clusters(dist_matrix, 0.0);
+
+    // cosigt: for (eps in seq(0.01, 0.30, 0.01))
+    for eps_int in 1..=30 {
+        let eps = eps_int as f64 / 100.0;
+        let curr_clusters = dbscan_count_clusters(dist_matrix, eps);
+
+        // cosigt: if (abs(pclust - cclust) <= 1)
+        let change = (prev_clusters as i64 - curr_clusters as i64).abs();
+        if change <= 1 {
+            // cosigt: if ((cclust <= round(attr(distanceMatrix, "Size") / 10)))
+            let max_clusters = n_paths / 10;
+            if curr_clusters <= max_clusters {
+                debug!("DBSCAN: stabilized at eps {:.2} with {} clusters (max allowed: {})",
+                       eps, curr_clusters, max_clusters);
+                return eps;
+            }
+        }
+        prev_clusters = curr_clusters;
+    }
+
+    // cosigt: return(ifelse(eps < 0.3, optimal_eps, 0.3))
+    debug!("DBSCAN: no stabilization found, using fallback eps 0.30");
+    0.30
+}
+
+/// Compute base-pair weighted Jaccard similarity (matching odgi similarity)
+/// For each node: add min(bp_a_on_node, bp_b_on_node) to intersection
+/// jaccard = intersection / (bp_a + bp_b - intersection)
+fn weighted_jaccard_similarity(
+    counts_a: &FxHashMap<u64, u64>,  // node_id -> total bp on that node for path a
+    counts_b: &FxHashMap<u64, u64>,  // node_id -> total bp on that node for path b
+    bp_a: u64,  // total bp in path a
+    bp_b: u64,  // total bp in path b
+) -> f64 {
+    if bp_a == 0 && bp_b == 0 {
+        return 1.0;
+    }
+
+    // Compute intersection: sum of min(bp_a_on_node, bp_b_on_node) for all nodes
+    let mut intersection: u64 = 0;
+    for (&node, &bp_a_on_node) in counts_a {
+        if let Some(&bp_b_on_node) = counts_b.get(&node) {
+            intersection += bp_a_on_node.min(bp_b_on_node);
+        }
+    }
+
+    let union = bp_a + bp_b - intersection;
     if union == 0 {
         1.0
     } else {
@@ -619,76 +781,233 @@ fn jaccard_similarity(a: &[u64], b: &[u64]) -> f64 {
     }
 }
 
-/// Cluster paths by bin-level Jaccard similarity using greedy nearest-neighbor ordering
+/// Compute EDR (estimated difference rate) from Jaccard similarity
+/// EDR = (1 - jaccard) / (1 + jaccard)
+/// This matches odgi similarity's estimated.difference.rate
+fn jaccard_to_edr(jaccard: f64) -> f64 {
+    (1.0 - jaccard) / (1.0 + jaccard)
+}
+
+/// Cluster paths by EDR (estimated difference rate) using DBSCAN (matching cosigt exactly)
+/// Uses base-pair weighted Jaccard similarity like odgi similarity
 fn cluster_paths_by_similarity(
     paths: &[&GfaPath],
-    graph: &Graph,
-    bin_width: f64,
-) -> Vec<usize> {
+    segment_lengths: &[u64],  // segment_id -> length (0-indexed by segment_id - 1)
+    threshold: Option<f64>,
+    use_all_nodes: bool,
+) -> ClusteringResult {
     if paths.is_empty() {
-        return Vec::new();
+        return ClusteringResult { ordering: Vec::new(), cluster_ids: Vec::new(), num_clusters: 0 };
     }
 
-    // Build bin sets in parallel
-    let path_bins: Vec<Vec<u64>> = paths
+    let n = paths.len();
+
+    // Build bp-weighted node counts for each path (node_id -> total bp on that node)
+    // This matches odgi similarity: for each step, add segment length to that node's count
+    let path_bp_counts: Vec<FxHashMap<u64, u64>> = paths
         .par_iter()
         .map(|path| {
-            let mut bins: Vec<u64> = path
-                .steps
-                .iter()
-                .filter_map(|step| {
-                    let seg_id = step.segment_id as usize;
-                    if seg_id < graph.segments.len() {
-                        let offset = graph.segment_offsets[seg_id];
-                        let seg_len = graph.segments[seg_id].sequence_len;
-                        let first = (offset as f64 / bin_width).floor() as u64;
-                        let last = ((offset + seg_len - 1) as f64 / bin_width).floor() as u64;
-                        Some(first..=last)
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
-                .collect();
-            bins.sort_unstable();
-            bins.dedup();
-            bins
+            let mut counts: FxHashMap<u64, u64> = FxHashMap::default();
+            for step in &path.steps {
+                let seg_len = segment_lengths.get(step.segment_id as usize - 1).copied().unwrap_or(0);
+                *counts.entry(step.segment_id).or_insert(0) += seg_len;
+            }
+            counts
         })
         .collect();
 
-    // Find starting path (largest bin set)
-    let (start_idx, _) = path_bins
-        .par_iter()
-        .enumerate()
-        .max_by_key(|(_, b)| b.len())
-        .unwrap();
+    // Collect all unique nodes
+    let mut all_nodes: FxHashSet<u64> = FxHashSet::default();
+    for counts in &path_bp_counts {
+        for &node in counts.keys() {
+            all_nodes.insert(node);
+        }
+    }
+    let total_unique_nodes = all_nodes.len();
 
-    // Greedy nearest-neighbor ordering with parallel similarity search
-    let mut placed = vec![false; paths.len()];
-    let mut ordering = Vec::with_capacity(paths.len());
-    placed[start_idx] = true;
-    ordering.push(start_idx);
-    let mut current = start_idx;
+    // Determine which nodes to use for clustering (based on bp variation, not just count)
+    let nodes_to_use: FxHashSet<u64> = if use_all_nodes {
+        debug!("Clustering mode: --cluster-all-nodes (using all {} nodes)", total_unique_nodes);
+        all_nodes
+    } else {
+        // Find variable nodes: nodes where bp count varies across paths
+        let variable_nodes: FxHashSet<u64> = all_nodes
+            .into_iter()
+            .filter(|&node| {
+                let first_bp = path_bp_counts[0].get(&node).copied().unwrap_or(0);
+                path_bp_counts.iter().skip(1).any(|counts| {
+                    counts.get(&node).copied().unwrap_or(0) != first_bp
+                })
+            })
+            .collect();
 
-    while ordering.len() < paths.len() {
-        let current_bins = &path_bins[current];
-        let best = (0..paths.len())
-            .into_par_iter()
-            .filter(|&i| !placed[i])
-            .map(|i| (i, jaccard_similarity(current_bins, &path_bins[i])))
-            .max_by(|(i1, s1), (i2, s2)| s1.partial_cmp(s2).unwrap().then_with(|| i2.cmp(i1)));
+        let invariant_nodes = total_unique_nodes - variable_nodes.len();
+        debug!("Clustering mode: variable nodes only (using {} of {} nodes, {} invariant nodes excluded)",
+               variable_nodes.len(), total_unique_nodes, invariant_nodes);
+        variable_nodes
+    };
 
-        match best {
-            Some((idx, _)) => {
-                placed[idx] = true;
-                ordering.push(idx);
-                current = idx;
-            }
-            None => break,
+    // Build filtered bp counts (only include nodes_to_use)
+    let filtered_bp_counts: Vec<FxHashMap<u64, u64>> = path_bp_counts
+        .iter()
+        .map(|counts| {
+            counts
+                .iter()
+                .filter(|(node, _)| nodes_to_use.contains(node))
+                .map(|(&node, &bp)| (node, bp))
+                .collect()
+        })
+        .collect();
+
+    // Compute filtered total bp for each path (only from nodes_to_use)
+    let filtered_total_bp: Vec<u64> = filtered_bp_counts
+        .iter()
+        .map(|counts| counts.values().sum())
+        .collect();
+
+    // Build full pairwise EDR matrix (matching cosigt: uses normalized EDR)
+    debug!("Computing {}x{} pairwise EDR matrix", n, n);
+
+    // Compute upper triangle in parallel: EDR for each pair
+    let filtered_bp_counts_ref = &filtered_bp_counts;
+    let filtered_total_bp_ref = &filtered_total_bp;
+    let pairs: Vec<(usize, usize, f64)> = (0..n)
+        .into_par_iter()
+        .flat_map(|i| {
+            (i + 1..n)
+                .map(move |j| {
+                    let jaccard = weighted_jaccard_similarity(
+                        &filtered_bp_counts_ref[i],
+                        &filtered_bp_counts_ref[j],
+                        filtered_total_bp_ref[i],
+                        filtered_total_bp_ref[j],
+                    );
+                    let edr = jaccard_to_edr(jaccard);
+                    (i, j, edr)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // Find max EDR for normalization (like cosigt: maxD <- max(regularMatrix))
+    let max_edr = pairs.iter().map(|(_, _, edr)| *edr).fold(0.0f64, f64::max);
+    debug!("Max EDR: {:.6}", max_edr);
+
+    // Build normalized distance matrix (like cosigt: normRegularMatrix <- regularMatrix / maxD)
+    let mut dist_matrix: Vec<Vec<f64>> = vec![vec![0.0; n]; n];
+    for (i, j, edr) in pairs {
+        let norm_edr = if max_edr > 0.0 { edr / max_edr } else { 0.0 };
+        dist_matrix[i][j] = norm_edr;
+        dist_matrix[j][i] = norm_edr;
+    }
+
+    // Log distance distribution
+    let mut all_dists: Vec<f64> = Vec::with_capacity(n * (n - 1) / 2);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            all_dists.push(dist_matrix[i][j]);
+        }
+    }
+    all_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if !all_dists.is_empty() {
+        debug!("Distance range: {:.3} - {:.3}", all_dists[0], all_dists[all_dists.len() - 1]);
+        if all_dists.len() >= 4 {
+            let q1 = all_dists[all_dists.len() / 4];
+            let median = all_dists[all_dists.len() / 2];
+            let q3 = all_dists[3 * all_dists.len() / 4];
+            debug!("Distance quartiles: Q1={:.3}, median={:.3}, Q3={:.3}", q1, median, q3);
         }
     }
 
-    ordering
+    // Find optimal eps (or convert user threshold to eps)
+    let eps = match threshold {
+        Some(t) => {
+            let e = 1.0 - t; // Convert similarity threshold to distance eps
+            debug!("Using user-specified threshold {:.2} (eps = {:.2})", t, e);
+            e
+        }
+        None => find_optimal_eps(&dist_matrix, n),
+    };
+    debug!("DBSCAN eps: {:.2}", eps);
+
+    // Run DBSCAN to get cluster assignments
+    let dbscan_clusters = dbscan_cluster(&dist_matrix, eps);
+    let num_clusters = dbscan_clusters.iter().max().map(|&m| m + 1).unwrap_or(1);
+    debug!("DBSCAN detected {} clusters", num_clusters);
+
+    // Group paths by cluster
+    let mut cluster_members: Vec<Vec<usize>> = vec![Vec::new(); num_clusters];
+    for (i, &cluster) in dbscan_clusters.iter().enumerate() {
+        cluster_members[cluster].push(i);
+    }
+
+    // Sort clusters by size (largest first) for consistent ordering
+    cluster_members.sort_by(|a, b| b.len().cmp(&a.len()));
+
+    // Build final ordering: within each cluster, order by greedy nearest-neighbor
+    let mut ordering = Vec::with_capacity(n);
+    let mut final_cluster_ids = Vec::with_capacity(n);
+
+    for (cluster_id, members) in cluster_members.iter().enumerate() {
+        if members.is_empty() {
+            continue;
+        }
+
+        if members.len() == 1 {
+            ordering.push(members[0]);
+            final_cluster_ids.push(cluster_id);
+        } else {
+            // Greedy nearest-neighbor within cluster
+            let mut placed = vec![false; members.len()];
+
+            // Start with the member that has the most base pairs
+            let start = members
+                .iter()
+                .enumerate()
+                .max_by_key(|&(_, &idx)| filtered_total_bp[idx])
+                .map(|(local_idx, _)| local_idx)
+                .unwrap();
+
+            placed[start] = true;
+            ordering.push(members[start]);
+            final_cluster_ids.push(cluster_id);
+            let mut current = start;
+
+            while ordering.len() < ordering.capacity() && placed.iter().filter(|&&p| !p).count() > 0 {
+                // Find nearest unplaced member within this cluster
+                let current_global = members[current];
+                let mut best_local = None;
+                let mut best_dist = f64::MAX;
+
+                for (local_idx, &global_idx) in members.iter().enumerate() {
+                    if !placed[local_idx] {
+                        let dist = dist_matrix[current_global][global_idx];
+                        if dist < best_dist {
+                            best_dist = dist;
+                            best_local = Some(local_idx);
+                        }
+                    }
+                }
+
+                if let Some(local_idx) = best_local {
+                    placed[local_idx] = true;
+                    ordering.push(members[local_idx]);
+                    final_cluster_ids.push(cluster_id);
+                    current = local_idx;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    debug!("Final ordering: {} paths in {} clusters", ordering.len(), num_clusters);
+
+    ClusteringResult {
+        ordering,
+        cluster_ids: final_cluster_ids,
+        num_clusters,
+    }
 }
 
 #[derive(Default, Clone)]
@@ -826,15 +1145,27 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let viz_width = args.width.min(len_to_visualize as u32);
 
     let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
-    let scale_x = 1.0; // In binned mode
-    let scale_y = viz_width as f64 / len_to_visualize as f64;
+    let _scale_x = 1.0; // In binned mode
+    let _scale_y = viz_width as f64 / len_to_visualize as f64;
 
     // Cluster paths by similarity if requested
-    if args.cluster_paths {
-        debug!("Clustering {} paths by Jaccard similarity", display_paths.len());
-        let ordering = cluster_paths_by_similarity(&display_paths, graph, bin_width);
-        display_paths = ordering.iter().map(|&i| display_paths[i]).collect();
-    }
+    let cluster_result = if args.cluster_paths {
+        debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
+        // Build segment lengths vector for EDR computation
+        let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
+        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes);
+        display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
+        Some(result)
+    } else {
+        None
+    };
+
+    // Calculate total gap space needed for cluster separators
+    let total_gap = if let Some(ref cr) = cluster_result {
+        (cr.num_clusters.saturating_sub(1) as u32) * args.cluster_gap
+    } else {
+        0
+    };
 
     debug!("Binned mode");
     debug!("bin width: {:.2e}", bin_width);
@@ -852,7 +1183,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         0
     };
 
-    let path_space = path_count * pix_per_path;
+    let path_space = path_count * pix_per_path + total_gap;
 
     // Height for edge visualization area - matches odgi's calculation
     // height = min(len_to_visualize, args.height + bottom_padding)
@@ -881,8 +1212,21 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         .and_then(|p| load_path_colors(p).ok());
 
     // Render each path
+    let mut prev_cluster_id: Option<usize> = None;
+    let mut cumulative_gap: u32 = 0;
+    let cluster_gap = args.cluster_gap;
+
     for (path_idx, path) in display_paths.iter().enumerate() {
-        let path_y = path_idx as u32;
+        // Add gap before new cluster (except first)
+        if let Some(ref cr) = cluster_result {
+            let cluster_id = cr.cluster_ids[path_idx];
+            if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+                cumulative_gap += cluster_gap;
+            }
+            prev_cluster_id = Some(cluster_id);
+        }
+
+        let y_start = path_idx as u32 * pix_per_path + cumulative_gap;
 
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
             colors.get(&path.name).copied()
@@ -898,14 +1242,13 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             let left_padding = max_num_of_chars - num_of_chars;
 
             if args.color_path_names_background {
-                let y_start = path_y * pix_per_path;
                 for x in (left_padding as u32 * char_size)..path_names_width {
                     add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
                         path_r, path_g, path_b, args.no_path_borders, args.black_path_borders);
                 }
             }
 
-            let base_y = path_y * pix_per_path + pix_per_path / 2 - char_size / 2;
+            let base_y = y_start + pix_per_path / 2 - char_size / 2;
             for (i, c) in path.name.chars().take(num_of_chars).enumerate() {
                 // +3 offset to match odgi's text positioning
                 let base_x = (left_padding + i) as u32 * char_size + 3;
@@ -947,8 +1290,6 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
 
         // Render bins
-        let y_start = path_y * pix_per_path;
-
         for (bin_idx, bin_info) in &bins {
             let x = (*bin_idx as u32).min(viz_width - 1);
 
@@ -1116,11 +1457,16 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
 
     // Cluster paths by similarity if requested
-    if args.cluster_paths {
-        debug!("Clustering {} paths by Jaccard similarity", display_paths.len());
-        let ordering = cluster_paths_by_similarity(&display_paths, graph, bin_width);
-        display_paths = ordering.iter().map(|&i| display_paths[i]).collect();
-    }
+    let cluster_result = if args.cluster_paths {
+        debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
+        // Build segment lengths vector for EDR computation
+        let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
+        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes);
+        display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
+        Some(result)
+    } else {
+        None
+    };
 
     // Calculate text width based on longest path name
     let max_name_len = display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10);
@@ -1164,8 +1510,22 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let mut max_y: f64 = path_space as f64;
 
     // Render each path
+    let mut prev_cluster_id: Option<usize> = None;
+    let mut cumulative_gap: f64 = 0.0;
+    let cluster_gap = args.cluster_gap as f64;
+
     for (path_idx, path) in display_paths.iter().enumerate() {
+        // Add gap before new cluster (except first)
+        if let Some(ref cr) = cluster_result {
+            let cluster_id = cr.cluster_ids[path_idx];
+            if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+                cumulative_gap += cluster_gap;
+            }
+            prev_cluster_id = Some(cluster_id);
+        }
+
         let path_y = path_idx as u32;
+        let y_start = (path_y * pix_per_path) as f64 + cumulative_gap;
 
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
             colors.get(&path.name).copied()
@@ -1176,12 +1536,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
         // Render path name (full name, vector font)
         if !args.hide_path_names {
-            let text_y = (path_y * pix_per_path) as f64 + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
+            let text_y = y_start + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
             let text_color = if args.color_path_names_background {
                 // White text on colored background
                 svg.push_str(&format!(
                     r#"<rect x="0" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                    path_y * pix_per_path, text_width, pix_per_path, path_r, path_g, path_b
+                    y_start, text_width, pix_per_path, path_r, path_g, path_b
                 ));
                 svg.push('\n');
                 "white"
@@ -1223,7 +1583,6 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
 
         // Render bins as rectangles
-        let y_start = (path_y * pix_per_path) as f64;
         let rect_height = if args.no_path_borders || pix_per_path < 3 {
             pix_per_path as f64
         } else {
@@ -1303,6 +1662,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
     }
 
+    // Update path space to include cumulative gap
+    let path_space_with_gap = path_space as f64 + cumulative_gap;
+    max_y = max_y.max(path_space_with_gap);
+
     // Render edges as SVG paths
     for edge in &graph.edges {
         let from_id = edge.from_id as usize;
@@ -1331,7 +1694,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
             let ax = text_width + a.round();
             let bx = text_width + b.round();
-            let base_y = path_space as f64;
+            let base_y = path_space_with_gap;
 
             // Skip degenerate edges (zero height and minimal width - not visible)
             if h < 1.0 && (bx - ax).abs() < 2.0 {
