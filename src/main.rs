@@ -77,7 +77,7 @@ struct Args {
     path_colors: Option<PathBuf>,
 
     /// Automatically order paths by similarity.
-    #[arg(short = 'k', long = "cluster-paths")]
+    #[arg(short = 'k', long = "cluster-paths", conflicts_with = "paths_to_display")]
     cluster_paths: bool,
 
     /// Color nodes listed in FILE in red and all other nodes in grey.
@@ -592,6 +592,115 @@ fn load_paths_to_display(path: &PathBuf) -> std::io::Result<Vec<String>> {
     Ok(paths)
 }
 
+/// Compute Jaccard similarity between two sorted bin vectors
+fn jaccard_similarity(a: &[u64], b: &[u64]) -> f64 {
+    let mut i = 0;
+    let mut j = 0;
+    let mut intersection = 0;
+
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            intersection += 1;
+            i += 1;
+            j += 1;
+        } else if a[i] < b[j] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+
+    let union = a.len() + b.len() - intersection;
+    if union == 0 {
+        1.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Cluster paths by bin-level Jaccard similarity using greedy nearest-neighbor ordering
+fn cluster_paths_by_similarity(
+    paths: &[&GfaPath],
+    graph: &Graph,
+    bin_width: f64,
+) -> Vec<usize> {
+    if paths.is_empty() {
+        return Vec::new();
+    }
+
+    // Build bin sets for each path
+    let mut path_bins: Vec<Vec<u64>> = Vec::with_capacity(paths.len());
+
+    for path in paths {
+        let mut bins: Vec<u64> = Vec::new();
+
+        for step in &path.steps {
+            let seg_id = step.segment_id as usize;
+            if seg_id < graph.segments.len() {
+                let offset = graph.segment_offsets[seg_id];
+                let seg_len = graph.segments[seg_id].sequence_len;
+
+                let first_bin = (offset as f64 / bin_width).floor() as u64;
+                let last_bin = ((offset + seg_len - 1) as f64 / bin_width).floor() as u64;
+
+                for b in first_bin..=last_bin {
+                    bins.push(b);
+                }
+            }
+        }
+
+        // Sort and deduplicate
+        bins.sort_unstable();
+        bins.dedup();
+        path_bins.push(bins);
+    }
+
+    // Find starting path (largest bin set)
+    let mut start_idx = 0;
+    let mut max_size = path_bins[0].len();
+    for (i, bins) in path_bins.iter().enumerate().skip(1) {
+        if bins.len() > max_size {
+            max_size = bins.len();
+            start_idx = i;
+        }
+    }
+
+    // Greedy nearest-neighbor ordering
+    let mut placed = vec![false; paths.len()];
+    let mut ordering = Vec::with_capacity(paths.len());
+
+    let mut current = start_idx;
+    placed[current] = true;
+    ordering.push(current);
+
+    while ordering.len() < paths.len() {
+        let mut best_idx = None;
+        let mut best_score = -1.0;
+
+        for i in 0..paths.len() {
+            if placed[i] {
+                continue;
+            }
+            let score = jaccard_similarity(&path_bins[current], &path_bins[i]);
+            if score > best_score || (score == best_score && best_idx.map_or(true, |b| i < b)) {
+                best_score = score;
+                best_idx = Some(i);
+            }
+        }
+
+        match best_idx {
+            Some(idx) => {
+                placed[idx] = true;
+                ordering.push(idx);
+                current = idx;
+            }
+            None => break,
+        }
+    }
+
+    ordering
+}
+
 #[derive(Default, Clone)]
 struct BinInfo {
     mean_depth: f64,
@@ -729,6 +838,13 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
     let scale_x = 1.0; // In binned mode
     let scale_y = viz_width as f64 / len_to_visualize as f64;
+
+    // Cluster paths by similarity if requested
+    if args.cluster_paths {
+        debug!("Clustering {} paths by Jaccard similarity", display_paths.len());
+        let ordering = cluster_paths_by_similarity(&display_paths, graph, bin_width);
+        display_paths = ordering.iter().map(|&i| display_paths[i]).collect();
+    }
 
     debug!("Binned mode");
     debug!("bin width: {:.2e}", bin_width);
@@ -1008,6 +1124,13 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let len_to_visualize = graph.total_length;
     let viz_width = args.width.min(len_to_visualize as u32);
     let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
+
+    // Cluster paths by similarity if requested
+    if args.cluster_paths {
+        debug!("Clustering {} paths by Jaccard similarity", display_paths.len());
+        let ordering = cluster_paths_by_similarity(&display_paths, graph, bin_width);
+        display_paths = ordering.iter().map(|&i| display_paths[i]).collect();
+    }
 
     // Calculate text width based on longest path name
     let max_name_len = display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10);
