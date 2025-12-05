@@ -513,6 +513,7 @@ dependencies = [
  "env_logger",
  "image",
  "log",
+ "rayon",
  "rustc-hash",
  "sha2",
 ]

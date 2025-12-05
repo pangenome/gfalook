@@ -1,5 +1,6 @@
 use clap::Parser;
 use log::{debug, info};
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -628,68 +629,57 @@ fn cluster_paths_by_similarity(
         return Vec::new();
     }
 
-    // Build bin sets for each path
-    let mut path_bins: Vec<Vec<u64>> = Vec::with_capacity(paths.len());
-
-    for path in paths {
-        let mut bins: Vec<u64> = Vec::new();
-
-        for step in &path.steps {
-            let seg_id = step.segment_id as usize;
-            if seg_id < graph.segments.len() {
-                let offset = graph.segment_offsets[seg_id];
-                let seg_len = graph.segments[seg_id].sequence_len;
-
-                let first_bin = (offset as f64 / bin_width).floor() as u64;
-                let last_bin = ((offset + seg_len - 1) as f64 / bin_width).floor() as u64;
-
-                for b in first_bin..=last_bin {
-                    bins.push(b);
-                }
-            }
-        }
-
-        // Sort and deduplicate
-        bins.sort_unstable();
-        bins.dedup();
-        path_bins.push(bins);
-    }
+    // Build bin sets in parallel
+    let path_bins: Vec<Vec<u64>> = paths
+        .par_iter()
+        .map(|path| {
+            let mut bins: Vec<u64> = path
+                .steps
+                .iter()
+                .filter_map(|step| {
+                    let seg_id = step.segment_id as usize;
+                    if seg_id < graph.segments.len() {
+                        let offset = graph.segment_offsets[seg_id];
+                        let seg_len = graph.segments[seg_id].sequence_len;
+                        let first = (offset as f64 / bin_width).floor() as u64;
+                        let last = ((offset + seg_len - 1) as f64 / bin_width).floor() as u64;
+                        Some(first..=last)
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .collect();
+            bins.sort_unstable();
+            bins.dedup();
+            bins
+        })
+        .collect();
 
     // Find starting path (largest bin set)
-    let mut start_idx = 0;
-    let mut max_size = path_bins[0].len();
-    for (i, bins) in path_bins.iter().enumerate().skip(1) {
-        if bins.len() > max_size {
-            max_size = bins.len();
-            start_idx = i;
-        }
-    }
+    let (start_idx, _) = path_bins
+        .par_iter()
+        .enumerate()
+        .max_by_key(|(_, b)| b.len())
+        .unwrap();
 
-    // Greedy nearest-neighbor ordering
+    // Greedy nearest-neighbor ordering with parallel similarity search
     let mut placed = vec![false; paths.len()];
     let mut ordering = Vec::with_capacity(paths.len());
-
+    placed[start_idx] = true;
+    ordering.push(start_idx);
     let mut current = start_idx;
-    placed[current] = true;
-    ordering.push(current);
 
     while ordering.len() < paths.len() {
-        let mut best_idx = None;
-        let mut best_score = -1.0;
+        let current_bins = &path_bins[current];
+        let best = (0..paths.len())
+            .into_par_iter()
+            .filter(|&i| !placed[i])
+            .map(|i| (i, jaccard_similarity(current_bins, &path_bins[i])))
+            .max_by(|(i1, s1), (i2, s2)| s1.partial_cmp(s2).unwrap().then_with(|| i2.cmp(i1)));
 
-        for i in 0..paths.len() {
-            if placed[i] {
-                continue;
-            }
-            let score = jaccard_similarity(&path_bins[current], &path_bins[i]);
-            if score > best_score || (score == best_score && best_idx.map_or(true, |b| i < b)) {
-                best_score = score;
-                best_idx = Some(i);
-            }
-        }
-
-        match best_idx {
-            Some(idx) => {
+        match best {
+            Some((idx, _)) => {
                 placed[idx] = true;
                 ordering.push(idx);
                 current = idx;
