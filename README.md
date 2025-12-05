@@ -107,10 +107,10 @@ gfalook -i graph.gfa -o compressed.png -x 1000 -y 100 -O
 
 ### Path clustering (`-k`)
 
-Automatically cluster and reorder paths by similarity. Colored bars on the left indicate cluster membership:
+Automatically cluster and reorder paths by similarity. Colored bars on the left indicate cluster membership. Combined with `-m` for better visibility:
 
 ```bash
-gfalook -i graph.gfa -o clustered.png -x 1000 -y 500 -k
+gfalook -i graph.gfa -o clustered.png -x 1000 -y 500 -k -m
 ```
 
 ![Path clustering](images/clustered.png)
