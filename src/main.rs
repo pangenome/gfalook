@@ -1174,6 +1174,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
         let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
+        // Write cluster assignments to TSV
+        write_cluster_tsv(&args.out, &display_paths, &result);
         Some(result)
     } else {
         None
@@ -1457,6 +1459,27 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     result
 }
 
+/// Write clustering results to a TSV file
+fn write_cluster_tsv(
+    output_path: &PathBuf,
+    display_paths: &[&GfaPath],
+    cluster_result: &ClusteringResult,
+) {
+    // Derive TSV path from output path: foo.png -> foo.clusters.tsv
+    let tsv_path = output_path.with_extension("clusters.tsv");
+
+    let mut content = String::from("path.name\tcluster\n");
+    for (path_idx, path) in display_paths.iter().enumerate() {
+        let cluster_id = cluster_result.cluster_ids[path_idx];
+        content.push_str(&format!("{}\t{}\n", path.name, cluster_id));
+    }
+
+    match std::fs::write(&tsv_path, content) {
+        Ok(_) => info!("Cluster assignments saved to {:?}", tsv_path),
+        Err(e) => eprintln!("Warning: could not write cluster TSV: {}", e),
+    }
+}
+
 /// Escape special XML characters
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -1498,6 +1521,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
         let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes);
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
+        // Write cluster assignments to TSV
+        write_cluster_tsv(&args.out, &display_paths, &result);
         Some(result)
     } else {
         None
