@@ -133,6 +133,14 @@ struct Args {
     #[arg(short = 'w', long = "bin-width", value_name = "bp")]
     bin_width: Option<f64>,
 
+    /// Automatically set width so each node/segment gets at least 1 pixel.
+    #[arg(long = "show-all-nodes")]
+    show_all_nodes: bool,
+
+    /// Minimum width in pixels for each node (use with --show-all-nodes, default: 1).
+    #[arg(long = "node-width", value_name = "N", default_value = "1")]
+    node_width: u32,
+
     /// Change the color with respect to the mean coverage.
     #[arg(short = 'm', long = "color-by-mean-depth")]
     color_by_mean_depth: bool,
@@ -1511,7 +1519,20 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let pix_per_path = args.path_height;
 
     let len_to_visualize = graph.total_length;
-    let viz_width = args.width.min(len_to_visualize as u32);
+
+    // Calculate width - if show_all_nodes, ensure each segment gets at least node_width pixels
+    let viz_width = if args.show_all_nodes {
+        let num_segments = graph.segments.len() as u32;
+        let min_width = num_segments * args.node_width;
+        if args.progress {
+            eprintln!("[gfalook::svg] show_all_nodes: {} segments × {} px = {} min width (user width: {})",
+                num_segments, args.node_width, min_width, args.width);
+        }
+        min_width.max(args.width)
+    } else {
+        args.width.min(len_to_visualize as u32)
+    };
+
     let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
 
     // Cluster paths by similarity if requested
