@@ -139,16 +139,16 @@ gfalook -i graph.gfa -o dendrogram.png -x 1000 -y 500 -k -D -m
 
 ![Dendrogram](images/dendrogram.png)
 
-### Dendrogram with representatives and X-axis (`-k -K -D -m --x-axis`)
+### Dendrogram with X-axis (`-k -D -m --x-axis`)
 
-Combine dendrogram, cluster representatives, depth coloring, and absolute X-axis coordinates:
+Combine dendrogram, depth coloring, and absolute X-axis coordinates:
 
 ```bash
-gfalook -i graph.gfa -o dendrogram_representatives.png -x 1000 -y 500 \
-    -k -K -D -m --x-axis "chm13#chr6:31825251-31908851" --x-axis-absolute
+gfalook -i graph.gfa -o dendrogram_xaxis.png -x 1000 -y 500 \
+    -k -D -m --x-axis "chm13#chr6:31825251-31908851" --x-axis-absolute
 ```
 
-![Dendrogram with representatives](images/dendrogram_representatives.png)
+![Dendrogram with X-axis](images/dendrogram_xaxis.png)
 
 ### UPGMA hierarchical clustering (`--use-upgma`)
 
