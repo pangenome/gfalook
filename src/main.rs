@@ -132,11 +132,11 @@ struct Args {
     bin_width: Option<f64>,
 
     /// Automatically set width so each node/segment gets at least 1 pixel.
-    #[arg(long = "show-all-nodes")]
+    #[arg(long = "show-all-nodes", help_heading = "Binned Mode")]
     show_all_nodes: bool,
 
     /// Minimum width in pixels for each node (use with --show-all-nodes, default: 1).
-    #[arg(long = "node-width", value_name = "N", default_value = "1")]
+    #[arg(long = "node-width", value_name = "N", default_value = "1", help_heading = "Binned Mode")]
     node_width: u32,
 
     /// Change the color with respect to the mean coverage.
@@ -172,6 +172,15 @@ struct Args {
     /// Apply alignment related visual motifs to paths which have this name prefix.
     #[arg(short = 'A', long = "alignment-prefix", value_name = "STRING", help_heading = "Special Modes")]
     alignment_prefix: Option<String>,
+
+    // === X-Axis ===
+    /// Show x-axis with coordinates. Use "pangenomic" for node-order coordinates or a path name for path-based coordinates.
+    #[arg(long = "x-axis", value_name = "COORD_SYSTEM", help_heading = "X-Axis")]
+    x_axis: Option<String>,
+
+    /// Number of ticks on the x-axis.
+    #[arg(long = "x-ticks", value_name = "N", default_value_t = 10, help_heading = "X-Axis")]
+    x_ticks: u32,
 
     // === Performance ===
     /// Number of threads to use for parallel operations.
@@ -1229,8 +1238,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
 
     let total_width = viz_width + path_names_width;
+    // Calculate max axis height for buffer allocation (16 pixels when enabled)
+    let max_axis_height: u32 = if args.x_axis.is_some() { 16 } else { 0 };
     // Initial height - will be cropped later based on actual edge rendering
-    let max_possible_height = path_space + edge_height;
+    let max_possible_height = path_space + max_axis_height + edge_height;
 
     let mut buffer = vec![255u8; (total_width * max_possible_height * 4) as usize];
     let mut path_names_buffer = if path_names_width > 0 {
@@ -1240,7 +1251,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     };
 
     // Track maximum y coordinate used (for cropping)
-    let mut max_y: u32 = path_space;
+    let mut max_y: u32 = path_space + max_axis_height;
 
     let custom_colors: Option<FxHashMap<String, (u8, u8, u8)>> = args
         .path_colors
@@ -1362,6 +1373,140 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
     }
 
+    // Calculate x-axis dimensions if enabled
+    let axis_char_size = 8u32; // Use native 5x8 font
+    let axis_tick_height = 4u32;
+    let axis_padding = 2u32;
+    let axis_label_height = axis_char_size;
+    let axis_total_height = if args.x_axis.is_some() {
+        axis_tick_height + axis_label_height + axis_padding * 2
+    } else {
+        0
+    };
+
+    // Render x-axis if requested (between paths and edges)
+    if let Some(ref coord_system) = args.x_axis {
+        let axis_y = path_space + axis_padding;
+
+        // Draw axis label on the left (in path_names_buffer if available)
+        let label_text = if coord_system.to_lowercase() == "pangenomic" {
+            "pangenomic".to_string()
+        } else {
+            coord_system.clone()
+        };
+
+        // Draw label text in path_names_buffer (aligned like path names, bold effect)
+        if path_names_width > 0 && text_only_width > 0 {
+            let max_label_chars = ((text_only_width) / char_size) as usize;
+            let display_label: String = if label_text.len() > max_label_chars && max_label_chars > 3 {
+                format!("{}...", &label_text.chars().take(max_label_chars.saturating_sub(3)).collect::<String>())
+            } else {
+                label_text.chars().take(max_label_chars).collect()
+            };
+
+            // Center vertically in axis area, similar to path name centering
+            let label_y = axis_y + axis_total_height / 2 - char_size / 2;
+            let left_padding = max_label_chars.saturating_sub(display_label.len());
+
+            for (i, c) in display_label.chars().enumerate() {
+                // +3 offset to match path name positioning
+                let char_x = (left_padding + i) as u32 * char_size + 3 + cluster_bar_width;
+                let c_byte = c as usize;
+                let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
+                // Draw twice with 1-pixel offset for bold effect
+                write_char(&mut path_names_buffer, path_names_width, char_x, label_y, char_data, char_size, 0, 0, 0);
+                if char_x + 1 < path_names_width {
+                    write_char(&mut path_names_buffer, path_names_width, char_x + 1, label_y, char_data, char_size, 0, 0, 0);
+                }
+            }
+        }
+
+        // Draw horizontal axis line
+        for x in path_names_width..total_width {
+            let idx = ((axis_y * total_width + x) * 4) as usize;
+            if idx + 3 < buffer.len() {
+                buffer[idx] = 0;
+                buffer[idx + 1] = 0;
+                buffer[idx + 2] = 0;
+                buffer[idx + 3] = 255;
+            }
+        }
+
+        // Calculate tick positions and labels
+        let num_ticks = args.x_ticks.max(2) as usize;
+
+        // For pangenomic coordinates, use total graph length
+        // For path-based coordinates, find the path and use its length
+        let (coord_start, coord_end) = if coord_system.to_lowercase() == "pangenomic" {
+            (0u64, len_to_visualize)
+        } else {
+            if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
+                let path_len: u64 = path.steps.iter()
+                    .map(|step| {
+                        let seg_id = step.segment_id as usize;
+                        if seg_id < graph.segments.len() {
+                            graph.segments[seg_id].sequence_len
+                        } else {
+                            0
+                        }
+                    })
+                    .sum();
+                (0u64, path_len)
+            } else {
+                debug!("Path '{}' not found, using pangenomic coordinates", coord_system);
+                (0u64, len_to_visualize)
+            }
+        };
+
+        // Draw ticks and labels
+        for i in 0..num_ticks {
+            let t = i as f64 / (num_ticks - 1) as f64;
+            let x_pos = path_names_width + (t * (viz_width as f64 - 1.0)) as u32;
+            let coord_value = coord_start as f64 + t * (coord_end - coord_start) as f64;
+
+            // Draw tick mark
+            for ty in 0..axis_tick_height {
+                let idx = (((axis_y + ty) * total_width + x_pos) * 4) as usize;
+                if idx + 3 < buffer.len() {
+                    buffer[idx] = 0;
+                    buffer[idx + 1] = 0;
+                    buffer[idx + 2] = 0;
+                    buffer[idx + 3] = 255;
+                }
+            }
+
+            // Format and draw tick label
+            let label = format_coordinate(coord_value as u64);
+            let label_y = axis_y + axis_tick_height;
+
+            // Calculate label x position based on tick position
+            let label_width = (label.len() as u32) * axis_char_size;
+            let label_x = if i == 0 {
+                x_pos // Left-aligned for first tick
+            } else if i == num_ticks - 1 {
+                x_pos.saturating_sub(label_width) // Right-aligned for last tick
+            } else {
+                x_pos.saturating_sub(label_width / 2) // Center-aligned for middle ticks
+            };
+
+            for (j, c) in label.chars().enumerate() {
+                let char_x = label_x + (j as u32) * axis_char_size;
+                if char_x + axis_char_size <= total_width {
+                    let c_byte = c as usize;
+                    let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
+                    // Draw twice with 1-pixel offset for bold effect
+                    write_char(&mut buffer, total_width, char_x, label_y, char_data, axis_char_size, 0, 0, 0);
+                    if char_x + 1 + axis_char_size <= total_width {
+                        write_char(&mut buffer, total_width, char_x + 1, label_y, char_data, axis_char_size, 0, 0, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    // Adjust path_space to include axis height for edge rendering
+    let path_space_with_axis = path_space + axis_total_height;
+
     // Render edges in the bottom area
     let mut edge_count = 0;
     for edge in &graph.edges {
@@ -1405,8 +1550,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             while i < dist as f64 {
                 let y = (i * scale_y_edges).round() as u32;
                 if y < edge_height {
-                    add_edge_point(&mut buffer, total_width, ax + path_names_width, y, path_space, 0);
-                    max_y = max_y.max(path_space + y + 1);
+                    add_edge_point(&mut buffer, total_width, ax + path_names_width, y, path_space_with_axis, 0);
+                    max_y = max_y.max(path_space_with_axis + y + 1);
                 }
                 i += 1.0 / scale_y_edges;
             }
@@ -1418,8 +1563,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             while x_f <= b {
                 let x = (x_f.round() as u32).min(viz_width.saturating_sub(1));
                 if x < viz_width {
-                    add_edge_point(&mut buffer, total_width, x + path_names_width, h, path_space, 0);
-                    max_y = max_y.max(path_space + h + 1);
+                    add_edge_point(&mut buffer, total_width, x + path_names_width, h, path_space_with_axis, 0);
+                    max_y = max_y.max(path_space_with_axis + h + 1);
                 }
                 x_f += 1.0; // In binned mode, scale_x is effectively 1
             }
@@ -1429,7 +1574,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             while j < dist as f64 {
                 let y = (j * scale_y_edges).round() as u32;
                 if y < edge_height {
-                    add_edge_point(&mut buffer, total_width, bx + path_names_width, y, path_space, 0);
+                    add_edge_point(&mut buffer, total_width, bx + path_names_width, y, path_space_with_axis, 0);
                 }
                 j += 1.0 / scale_y_edges;
             }
@@ -1440,8 +1585,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
     debug!("Drew {} edges", edge_count);
 
-    // Apply crop - max_y already includes path_space, add padding
-    let total_height = (path_space + edge_height).min(max_y + bottom_padding);
+    // Apply crop - max_y already includes path_space_with_axis, add padding
+    let total_height = (path_space_with_axis + edge_height).min(max_y + bottom_padding);
 
     // Combine path names and main image
     if path_names_width > 0 {
@@ -1498,6 +1643,19 @@ fn escape_xml(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// Format coordinate value with K/M/G suffixes for readability
+fn format_coordinate(value: u64) -> String {
+    if value >= 1_000_000_000 {
+        format!("{:.1}G", value as f64 / 1_000_000_000.0)
+    } else if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
 /// Render graph as SVG with vector fonts
 fn render_svg(args: &Args, graph: &Graph) -> String {
     let mut display_paths: Vec<&GfaPath> = graph.paths.iter().collect();
@@ -1525,10 +1683,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let viz_width = if args.show_all_nodes {
         let num_segments = graph.segments.len() as u32;
         let min_width = num_segments * args.node_width;
-        if args.progress {
-            eprintln!("[gfalook::svg] show_all_nodes: {} segments × {} px = {} min width (user width: {})",
-                num_segments, args.node_width, min_width, args.width);
-        }
+        debug!("show_all_nodes: {} segments × {} px = {} min width (user width: {})",
+            num_segments, args.node_width, min_width, args.width);
         min_width.max(args.width)
     } else {
         args.width.min(len_to_visualize as u32)
@@ -1762,7 +1918,130 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let path_space_with_gap = path_space as f64 + cumulative_gap;
     max_y = max_y.max(path_space_with_gap);
 
-    // Render edges as SVG paths
+    // Calculate x-axis dimensions if enabled
+    let axis_font_size = 10.0;
+    let tick_height = 5.0;
+    let axis_padding = 3.0;
+    let label_height = axis_font_size + 2.0;
+    let axis_total_height = if args.x_axis.is_some() {
+        tick_height + label_height + axis_padding * 2.0
+    } else {
+        0.0
+    };
+
+    // Render x-axis if requested (between paths and edges)
+    if let Some(ref coord_system) = args.x_axis {
+        // Y position for the axis line (at the bottom of paths)
+        let axis_y = path_space_with_gap + axis_padding;
+
+        // X start and end of the axis line
+        let axis_x_start = cluster_bar_width + text_width;
+        let axis_x_end = total_width;
+
+        // Draw axis label on the left
+        let label_text = if coord_system.to_lowercase() == "pangenomic" {
+            "pangenomic".to_string()
+        } else {
+            coord_system.clone()
+        };
+
+        // Truncate label if too long for the left panel (use same char_width as path names)
+        let max_label_chars = (text_width / char_width) as usize;
+        let display_label = if label_text.len() > max_label_chars && max_label_chars > 3 {
+            format!("{}...", &label_text[..max_label_chars.saturating_sub(3)])
+        } else {
+            label_text.clone()
+        };
+
+        // Position label like path names (same x offset, vertically centered in axis area)
+        let label_y = axis_y + (axis_total_height / 2.0) + (font_size / 3.0);
+        svg.push_str(&format!(
+            r#"<text x="{}" y="{}" class="path-name" font-weight="bold" fill="black">{}</text>"#,
+            cluster_bar_width + 5.0,
+            label_y,
+            escape_xml(&display_label)
+        ));
+        svg.push('\n');
+
+        // Draw horizontal axis line
+        svg.push_str(&format!(
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="black" stroke-width="1"/>"#,
+            axis_x_start, axis_y, axis_x_end, axis_y
+        ));
+        svg.push('\n');
+
+        // Calculate tick positions and labels
+        let num_ticks = args.x_ticks.max(2) as usize;
+
+        // For pangenomic coordinates, use total graph length
+        // For path-based coordinates, find the path and use its length
+        let (coord_start, coord_end) = if coord_system.to_lowercase() == "pangenomic" {
+            (0u64, len_to_visualize)
+        } else {
+            // Find the path with the specified name
+            if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
+                // Calculate path length from its steps
+                let path_len: u64 = path.steps.iter()
+                    .map(|step| {
+                        let seg_id = step.segment_id as usize;
+                        if seg_id < graph.segments.len() {
+                            graph.segments[seg_id].sequence_len
+                        } else {
+                            0
+                        }
+                    })
+                    .sum();
+                (0u64, path_len)
+            } else {
+                // Path not found, fall back to pangenomic
+                debug!("Path '{}' not found, using pangenomic coordinates", coord_system);
+                (0u64, len_to_visualize)
+            }
+        };
+
+        // Draw ticks
+        for i in 0..num_ticks {
+            let t = i as f64 / (num_ticks - 1) as f64;
+            let x_pos = axis_x_start as f64 + t * (viz_width as f64 - 1.0);
+            let coord_value = coord_start as f64 + t * (coord_end - coord_start) as f64;
+
+            // Draw tick mark
+            svg.push_str(&format!(
+                r#"<line x1="{:.1}" y1="{}" x2="{:.1}" y2="{}" stroke="black" stroke-width="1"/>"#,
+                x_pos, axis_y, x_pos, axis_y + tick_height
+            ));
+            svg.push('\n');
+
+            // Format coordinate value (use K/M/G suffixes for large numbers)
+            let label = format_coordinate(coord_value as u64);
+
+            // Calculate text anchor based on position
+            let anchor = if i == 0 {
+                "start"
+            } else if i == num_ticks - 1 {
+                "end"
+            } else {
+                "middle"
+            };
+
+            svg.push_str(&format!(
+                r#"<text x="{:.1}" y="{}" font-family="'DejaVu Sans Mono', 'Courier New', monospace" font-size="{}" font-weight="bold" text-anchor="{}" fill="black">{}</text>"#,
+                x_pos,
+                axis_y + tick_height + axis_font_size,
+                axis_font_size,
+                anchor,
+                label
+            ));
+            svg.push('\n');
+        }
+
+        // Update max_y to include axis
+        max_y = path_space_with_gap + axis_total_height;
+    }
+
+    // Render edges as SVG paths (offset by x-axis height if present)
+    let edge_base_y = path_space_with_gap + axis_total_height;
+
     for edge in &graph.edges {
         let from_id = edge.from_id as usize;
         let to_id = edge.to_id as usize;
@@ -1790,7 +2069,6 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
             let ax = cluster_bar_width + text_width + a.round();
             let bx = cluster_bar_width + text_width + b.round();
-            let base_y = path_space_with_gap;
 
             // Skip degenerate edges (zero height and minimal width - not visible)
             if h < 1.0 && (bx - ax).abs() < 2.0 {
@@ -1800,14 +2078,14 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             // Draw U-shaped edge as SVG path
             svg.push_str(&format!(
                 r#"<path d="M{:.1},{:.1} L{:.1},{:.1} L{:.1},{:.1} L{:.1},{:.1}" fill="none" stroke="black" stroke-width="1"/>"#,
-                ax, base_y,
-                ax, base_y + h,
-                bx, base_y + h,
-                bx, base_y
+                ax, edge_base_y,
+                ax, edge_base_y + h,
+                bx, edge_base_y + h,
+                bx, edge_base_y
             ));
             svg.push('\n');
 
-            max_y = max_y.max(base_y + h + 1.0);
+            max_y = max_y.max(edge_base_y + h + 1.0);
         }
     }
 
