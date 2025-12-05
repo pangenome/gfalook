@@ -129,9 +129,9 @@ gfalook -i graph.gfa -o clustered_representatives.png -x 1000 -y 500 -k -K -m
 
 ![Cluster representatives](images/clustered_representatives.png)
 
-### Dendrogram visualization (`-k -D`)
+### Dendrogram visualization (`-k -D -m`)
 
-Show hierarchical clustering tree alongside paths:
+Show hierarchical clustering tree alongside paths with depth coloring:
 
 ```bash
 gfalook -i graph.gfa -o dendrogram.png -x 1000 -y 500 -k -D -m
@@ -139,15 +139,16 @@ gfalook -i graph.gfa -o dendrogram.png -x 1000 -y 500 -k -D -m
 
 ![Dendrogram](images/dendrogram.png)
 
-### Dendrogram with depth coloring (`-k -D -m`)
+### Dendrogram with representatives and X-axis (`-k -K -D -m --x-axis`)
 
-Combine dendrogram with depth coloring for comprehensive visualization:
+Combine dendrogram, cluster representatives, depth coloring, and absolute X-axis coordinates:
 
 ```bash
-gfalook -i graph.gfa -o dendrogram_depth.png -x 1000 -y 500 -k -D -m --dendrogram-width 120
+gfalook -i graph.gfa -o dendrogram_representatives.png -x 1000 -y 500 \
+    -k -K -D -m --x-axis "chm13#chr6:31825251-31908851" --x-axis-absolute
 ```
 
-![Dendrogram with depth](images/dendrogram_depth.png)
+![Dendrogram with representatives](images/dendrogram_representatives.png)
 
 ### UPGMA hierarchical clustering (`--use-upgma`)
 
