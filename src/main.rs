@@ -1,4 +1,5 @@
 use clap::Parser;
+use log::{debug, info};
 use rustc_hash::FxHashMap;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -154,10 +155,10 @@ struct Args {
     #[arg(short = 't', long = "threads", value_name = "N")]
     threads: Option<usize>,
 
-    // Processing Information
-    /// Write the current progress to stderr.
-    #[arg(short = 'P', long = "progress")]
-    progress: bool,
+    // Logging
+    /// Verbosity level (0 = error, 1 = info, 2 = debug).
+    #[arg(short = 'v', long = "verbose", default_value = "1")]
+    verbose: u8,
 }
 
 /// A segment (node) in the graph
@@ -345,12 +346,10 @@ const COLORBREWER_SPECTRAL_13: [(u8, u8, u8); 13] = [
 ];
 
 /// Parse a GFA file efficiently
-fn parse_gfa(path: &PathBuf, progress: bool) -> std::io::Result<Graph> {
+fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
     let mut graph = Graph::new();
 
-    if progress {
-        eprintln!("[gfalook::parse] Loading GFA file...");
-    }
+    info!("Loading GFA file...");
 
     // First pass: collect segments
     let file = File::open(path)?;
@@ -377,13 +376,11 @@ fn parse_gfa(path: &PathBuf, progress: bool) -> std::io::Result<Graph> {
     }
     graph.total_length = offset;
 
-    if progress {
-        eprintln!(
-            "[gfalook::parse] Found {} segments, total length: {} bp",
-            graph.segments.len(),
-            graph.total_length
-        );
-    }
+    info!(
+        "Found {} segments, total length: {} bp",
+        graph.segments.len(),
+        graph.total_length
+    );
 
     // Use a set to deduplicate edges
     let mut edge_set: std::collections::HashSet<(u64, bool, u64, bool)> = std::collections::HashSet::new();
@@ -489,9 +486,7 @@ fn parse_gfa(path: &PathBuf, progress: bool) -> std::io::Result<Graph> {
         graph.edges.push(Edge { from_id, from_rev, to_id, to_rev });
     }
 
-    if progress {
-        eprintln!("[gfalook::parse] Found {} paths, {} edges", graph.paths.len(), graph.edges.len());
-    }
+    info!("Found {} paths, {} edges", graph.paths.len(), graph.edges.len());
 
     Ok(graph)
 }
@@ -735,11 +730,9 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let scale_x = 1.0; // In binned mode
     let scale_y = viz_width as f64 / len_to_visualize as f64;
 
-    if args.progress {
-        eprintln!("[gfalook::viz] Binned mode");
-        eprintln!("[gfalook::viz] bin width: {:.2e}", bin_width);
-        eprintln!("[gfalook::viz] image width: {}", viz_width);
-    }
+    debug!("Binned mode");
+    debug!("bin width: {:.2e}", bin_width);
+    debug!("image width: {}", viz_width);
 
     let max_name_len = display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10);
     let max_num_of_chars = args.max_num_of_characters.unwrap_or(max_name_len.min(128));
@@ -952,9 +945,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
     }
 
-    if args.progress {
-        eprintln!("[gfalook::viz] Drew {} edges", edge_count);
-    }
+    debug!("Drew {} edges", edge_count);
 
     // Apply crop - max_y already includes path_space, add padding
     let total_height = (path_space + edge_height).min(max_y + bottom_padding);
@@ -1264,11 +1255,18 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 fn main() {
     let args = Args::parse();
 
-    if args.progress {
-        eprintln!("[gfalook] Starting visualization...");
-    }
+    // Initialize logger based on verbosity
+    env_logger::Builder::new()
+        .filter_level(match args.verbose {
+            0 => log::LevelFilter::Error,
+            1 => log::LevelFilter::Info,
+            _ => log::LevelFilter::Debug,
+        })
+        .init();
 
-    let graph = match parse_gfa(&args.idx, args.progress) {
+    info!("Starting visualization...");
+
+    let graph = match parse_gfa(&args.idx) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error loading GFA file: {}", e);
@@ -1285,21 +1283,17 @@ fn main() {
         .map(|ext| ext.to_ascii_lowercase() == "svg")
         .unwrap_or(false);
 
-    if args.progress {
-        if is_svg {
-            eprintln!("[gfalook] Rendering SVG...");
-        } else {
-            eprintln!("[gfalook] Rendering image...");
-        }
+    if is_svg {
+        info!("Rendering SVG...");
+    } else {
+        info!("Rendering image...");
     }
 
     if is_svg {
         // SVG output
         let svg_content = render_svg(&args, &graph);
 
-        if args.progress {
-            eprintln!("[gfalook] Saving to {:?}...", args.out);
-        }
+        info!("Saving to {:?}...", args.out);
 
         let mut file = match File::create(&args.out) {
             Ok(f) => f,
@@ -1330,9 +1324,7 @@ fn main() {
             }
         }
 
-        if args.progress {
-            eprintln!("[gfalook] Saving to {:?}...", args.out);
-        }
+        info!("Saving to {:?}...", args.out);
 
         let img = image::RgbImage::from_raw(width, height, rgb_pixels)
             .expect("Failed to create image from buffer");
@@ -1343,7 +1335,5 @@ fn main() {
         }
     }
 
-    if args.progress {
-        eprintln!("[gfalook] Done.");
-    }
+    info!("Done.");
 }
