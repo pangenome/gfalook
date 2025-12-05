@@ -20,20 +20,20 @@ struct Args {
     out: PathBuf,
 
     // Visualization Options
-    /// Set the width in pixels of the output image (default: 1500).
-    #[arg(short = 'x', long = "width", value_name = "N", default_value = "1500")]
+    /// Set the width in pixels of the output image.
+    #[arg(short = 'x', long = "width", value_name = "N", default_value_t = 1500)]
     width: u32,
 
-    /// Set the height in pixels of the output image (default: 500).
-    #[arg(short = 'y', long = "height", value_name = "N", default_value = "500")]
+    /// Set the height in pixels of the output image.
+    #[arg(short = 'y', long = "height", value_name = "N", default_value_t = 500)]
     height: u32,
 
     /// The height in pixels for a path.
-    #[arg(short = 'a', long = "path-height", value_name = "N")]
-    path_height: Option<u32>,
+    #[arg(short = 'a', long = "path-height", value_name = "N", default_value_t = 10)]
+    path_height: u32,
 
     /// The padding in pixels on the x-axis for a path.
-    #[arg(short = 'X', long = "path-x-padding", value_name = "N", default_value = "0")]
+    #[arg(short = 'X', long = "path-x-padding", value_name = "N", default_value_t = 0)]
     path_x_padding: u32,
 
     /// Don't show path borders.
@@ -157,7 +157,7 @@ struct Args {
 
     // Logging
     /// Verbosity level (0 = error, 1 = info, 2 = debug).
-    #[arg(short = 'v', long = "verbose", default_value = "1")]
+    #[arg(short = 'v', long = "verbose", value_name = "N", default_value_t = 1)]
     verbose: u8,
 }
 
@@ -720,7 +720,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     }
 
     let path_count = display_paths.len() as u32;
-    let pix_per_path = args.path_height.unwrap_or(10);
+    let pix_per_path = args.path_height;
     let bottom_padding = 5u32;
 
     let len_to_visualize = graph.total_length;
@@ -1003,7 +1003,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     }
 
     let path_count = display_paths.len() as u32;
-    let pix_per_path = args.path_height.unwrap_or(10);
+    let pix_per_path = args.path_height;
 
     let len_to_visualize = graph.total_length;
     let viz_width = args.width.min(len_to_visualize as u32);
