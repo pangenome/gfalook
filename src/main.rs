@@ -2455,7 +2455,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             }
 
             let color = if let Some(ref colors) = custom_colors {
-                colors.get(&path.name).copied().unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
+                colors.get(&path.name).copied().unwrap_or((200, 200, 200)) // Light grey for non-specified paths
             } else {
                 compute_path_color(&path.name, args.color_by_prefix)
             };
@@ -2669,7 +2669,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
             colors.get(&path.name).copied()
-                .unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
+                .unwrap_or((200, 200, 200)) // Light grey for non-specified paths
         } else {
             compute_path_color(&path.name, args.color_by_prefix)
         };
@@ -3637,7 +3637,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
 
             let color = if let Some(ref colors) = custom_colors {
-                colors.get(&path.name).copied().unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
+                colors.get(&path.name).copied().unwrap_or((200, 200, 200)) // Light grey for non-specified paths
             } else {
                 compute_path_color(&path.name, args.color_by_prefix)
             };
@@ -3837,7 +3837,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
             colors.get(&path.name).copied()
-                .unwrap_or_else(|| compute_path_color(&path.name, args.color_by_prefix))
+                .unwrap_or((200, 200, 200)) // Light grey for non-specified paths
         } else {
             compute_path_color(&path.name, args.color_by_prefix)
         };
