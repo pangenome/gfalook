@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy lints
+        run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run unit tests
+        run: cargo test
+
+      - name: Integration test - basic PNG render
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/out.png -x 1000 -y 300
+          test -f test/out.png && echo "PNG output created successfully"
+
+      - name: Integration test - SVG render
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/out.svg -x 1000 -y 300
+          test -f test/out.svg && echo "SVG output created successfully"
+
+      - name: Integration test - depth coloring
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/depth.png -x 1000 -y 300 -m
+          test -f test/depth.png && echo "Depth coloring test passed"
+
+      - name: Integration test - strand coloring
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/strand.png -x 1000 -y 300 -S
+          test -f test/strand.png && echo "Strand coloring test passed"
+
+      - name: Integration test - compressed mode
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/compressed.png -x 1000 -y 100 -O
+          test -f test/compressed.png && echo "Compressed mode test passed"
+
+      - name: Integration test - binned mode
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/binned.png -x 1000 -y 300 -w 1000
+          test -f test/binned.png && echo "Binned mode test passed"
+
+      - name: Integration test - clustering
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/clustered.png -x 1000 -y 300 -k
+          test -f test/clustered.png && echo "Clustering test passed"
+
+      - name: Integration test - x-axis
+        run: |
+          ./target/release/gfalook -i test/chr6.C4.gfa -o test/xaxis.png -x 1000 -y 300 --x-axis pangenomic
+          test -f test/xaxis.png && echo "X-axis test passed"

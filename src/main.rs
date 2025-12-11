@@ -1,3 +1,6 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::needless_range_loop)]
+
 use clap::Parser;
 use log::{debug, info};
 use rayon::prelude::*;
@@ -5,7 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "gfalook")]
@@ -13,97 +16,209 @@ use std::path::PathBuf;
 struct Args {
     // === Input/Output ===
     /// Load the variation graph in GFA format from this FILE.
-    #[arg(short = 'i', long = "idx", value_name = "FILE", help_heading = "Input/Output")]
+    #[arg(
+        short = 'i',
+        long = "idx",
+        value_name = "FILE",
+        help_heading = "Input/Output"
+    )]
     idx: PathBuf,
 
     /// Write the visualization to this FILE (PNG or SVG based on extension).
-    #[arg(short = 'o', long = "out", value_name = "FILE", help_heading = "Input/Output")]
+    #[arg(
+        short = 'o',
+        long = "out",
+        value_name = "FILE",
+        help_heading = "Input/Output"
+    )]
     out: PathBuf,
 
     // === Image Size ===
     /// Set the width in pixels of the output image.
-    #[arg(short = 'x', long = "width", value_name = "N", default_value_t = 1500, help_heading = "Image Size")]
+    #[arg(
+        short = 'x',
+        long = "width",
+        value_name = "N",
+        default_value_t = 1500,
+        help_heading = "Image Size"
+    )]
     width: u32,
 
     /// Set the height in pixels of the output image.
-    #[arg(short = 'y', long = "height", value_name = "N", default_value_t = 500, help_heading = "Image Size")]
+    #[arg(
+        short = 'y',
+        long = "height",
+        value_name = "N",
+        default_value_t = 500,
+        help_heading = "Image Size"
+    )]
     height: u32,
 
     /// The height in pixels for a path.
-    #[arg(short = 'a', long = "path-height", value_name = "N", default_value_t = 10, help_heading = "Image Size")]
+    #[arg(
+        short = 'a',
+        long = "path-height",
+        value_name = "N",
+        default_value_t = 10,
+        help_heading = "Image Size"
+    )]
     path_height: u32,
 
     /// The padding in pixels on the x-axis for a path.
-    #[arg(short = 'X', long = "path-x-padding", value_name = "N", default_value_t = 0, help_heading = "Image Size")]
+    #[arg(
+        short = 'X',
+        long = "path-x-padding",
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "Image Size"
+    )]
     path_x_padding: u32,
 
     // === Clustering ===
     /// Automatically order paths by similarity.
-    #[arg(short = 'k', long = "cluster-paths", conflicts_with = "paths_to_display", help_heading = "Clustering")]
+    #[arg(
+        short = 'k',
+        long = "cluster-paths",
+        conflicts_with = "paths_to_display",
+        help_heading = "Clustering"
+    )]
     cluster_paths: bool,
 
     /// Similarity threshold for cluster detection (automatic if not specified).
-    #[arg(long = "cluster-threshold", value_name = "F", requires = "cluster_paths", help_heading = "Clustering")]
+    #[arg(
+        long = "cluster-threshold",
+        value_name = "F",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
     cluster_threshold: Option<f64>,
 
     /// Use all nodes for clustering instead of only variable nodes.
-    #[arg(long = "cluster-all-nodes", requires = "cluster_paths", help_heading = "Clustering")]
+    #[arg(
+        long = "cluster-all-nodes",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
     cluster_all_nodes: bool,
 
     /// Gap in pixels between clusters.
-    #[arg(long = "cluster-gap", value_name = "N", requires = "cluster_paths", default_value_t = 10, help_heading = "Clustering")]
+    #[arg(
+        long = "cluster-gap",
+        value_name = "N",
+        requires = "cluster_paths",
+        default_value_t = 10,
+        help_heading = "Clustering"
+    )]
     cluster_gap: u32,
 
     /// Maximum number of clusters allowed (automatic if not specified).
-    #[arg(long = "max-clusters", value_name = "N", requires = "cluster_paths", help_heading = "Clustering")]
+    #[arg(
+        long = "max-clusters",
+        value_name = "N",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
     max_clusters: Option<usize>,
 
     /// Show only one representative path (medoid) per cluster.
-    #[arg(short = 'K', long = "cluster-representatives", requires = "cluster_paths", help_heading = "Clustering")]
+    #[arg(
+        short = 'K',
+        long = "cluster-representatives",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
     cluster_representatives: bool,
 
     /// Show dendrogram on the left (hierarchical clustering tree).
-    #[arg(short = 'D', long = "dendrogram", requires = "cluster_paths", help_heading = "Clustering")]
+    #[arg(
+        short = 'D',
+        long = "dendrogram",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
     dendrogram: bool,
 
     /// Width of the dendrogram in pixels.
-    #[arg(long = "dendrogram-width", value_name = "PIXELS", default_value = "100", requires = "dendrogram", help_heading = "Clustering")]
+    #[arg(
+        long = "dendrogram-width",
+        value_name = "PIXELS",
+        default_value = "100",
+        requires = "dendrogram",
+        help_heading = "Clustering"
+    )]
     dendrogram_width: u32,
 
     /// Use pure UPGMA hierarchical clustering instead of DBSCAN.
     /// Clusters are determined by cutting the tree at a height threshold.
-    #[arg(long = "use-upgma", requires = "cluster_paths", help_heading = "Clustering")]
+    #[arg(
+        long = "use-upgma",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
     use_upgma: bool,
 
     /// Height threshold for cutting UPGMA tree (0.0-1.0, default: auto-detect).
     /// Lower values create more clusters, higher values create fewer.
-    #[arg(long = "upgma-threshold", value_name = "THRESHOLD", requires = "use_upgma", help_heading = "Clustering")]
+    #[arg(
+        long = "upgma-threshold",
+        value_name = "THRESHOLD",
+        requires = "use_upgma",
+        help_heading = "Clustering"
+    )]
     upgma_threshold: Option<f64>,
 
     // === Path Selection ===
     /// List of paths to display in the specified order.
-    #[arg(short = 'p', long = "paths-to-display", value_name = "FILE", help_heading = "Path Selection")]
+    #[arg(
+        short = 'p',
+        long = "paths-to-display",
+        value_name = "FILE",
+        help_heading = "Path Selection"
+    )]
     paths_to_display: Option<PathBuf>,
 
     /// Ignore paths starting with the given PREFIX.
-    #[arg(short = 'I', long = "ignore-prefix", value_name = "PREFIX", help_heading = "Path Selection")]
+    #[arg(
+        short = 'I',
+        long = "ignore-prefix",
+        value_name = "PREFIX",
+        help_heading = "Path Selection"
+    )]
     ignore_prefix: Option<String>,
 
     /// Nucleotide range to visualize: STRING=[PATH:]start-end.
-    #[arg(short = 'r', long = "path-range", value_name = "STRING", help_heading = "Path Selection")]
+    #[arg(
+        short = 'r',
+        long = "path-range",
+        value_name = "STRING",
+        help_heading = "Path Selection"
+    )]
     path_range: Option<String>,
 
     /// Merge paths beginning with prefixes listed in FILE.
-    #[arg(short = 'M', long = "prefix-merges", value_name = "FILE", help_heading = "Path Selection")]
+    #[arg(
+        short = 'M',
+        long = "prefix-merges",
+        value_name = "FILE",
+        help_heading = "Path Selection"
+    )]
     prefix_merges: Option<PathBuf>,
 
     // === Path Appearance ===
     /// Don't show path borders.
-    #[arg(short = 'n', long = "no-path-borders", help_heading = "Path Appearance")]
+    #[arg(
+        short = 'n',
+        long = "no-path-borders",
+        help_heading = "Path Appearance"
+    )]
     no_path_borders: bool,
 
     /// Draw path borders in black (default is white).
-    #[arg(short = 'b', long = "black-path-borders", help_heading = "Path Appearance")]
+    #[arg(
+        short = 'b',
+        long = "black-path-borders",
+        help_heading = "Path Appearance"
+    )]
     black_path_borders: bool,
 
     /// Pack all paths rather than displaying a single path per row.
@@ -111,7 +226,12 @@ struct Args {
     pack_paths: bool,
 
     /// Show thin links of this relative width to connect path pieces.
-    #[arg(short = 'L', long = "link-path-pieces", value_name = "FLOAT", help_heading = "Path Appearance")]
+    #[arg(
+        short = 'L',
+        long = "link-path-pieces",
+        value_name = "FLOAT",
+        help_heading = "Path Appearance"
+    )]
     link_path_pieces: Option<f64>,
 
     // === Path Names ===
@@ -120,20 +240,39 @@ struct Args {
     hide_path_names: bool,
 
     /// Color path names background with the same color as paths.
-    #[arg(short = 'C', long = "color-path-names-background", help_heading = "Path Names")]
+    #[arg(
+        short = 'C',
+        long = "color-path-names-background",
+        help_heading = "Path Names"
+    )]
     color_path_names_background: bool,
 
     /// Maximum number of characters to display for each path name.
-    #[arg(short = 'c', long = "max-num-of-characters", value_name = "N", help_heading = "Path Names")]
+    #[arg(
+        short = 'c',
+        long = "max-num-of-characters",
+        value_name = "N",
+        help_heading = "Path Names"
+    )]
     max_num_of_characters: Option<usize>,
 
     // === Coloring ===
     /// Color paths by their names looking at the prefix before the given character.
-    #[arg(short = 's', long = "color-by-prefix", value_name = "CHAR", help_heading = "Coloring")]
+    #[arg(
+        short = 's',
+        long = "color-by-prefix",
+        value_name = "CHAR",
+        help_heading = "Coloring"
+    )]
     color_by_prefix: Option<char>,
 
     /// Read per-path RGB colors from FILE.
-    #[arg(short = 'F', long = "path-colors", value_name = "FILE", help_heading = "Coloring")]
+    #[arg(
+        short = 'F',
+        long = "path-colors",
+        value_name = "FILE",
+        help_heading = "Coloring"
+    )]
     path_colors: Option<PathBuf>,
 
     /// Use red and blue coloring to display forward and reverse alignments.
@@ -141,20 +280,38 @@ struct Args {
     show_strand: bool,
 
     /// Change the color respect to the node strandness (black for forward, red for reverse).
-    #[arg(short = 'z', long = "color-by-mean-inversion-rate", help_heading = "Coloring")]
+    #[arg(
+        short = 'z',
+        long = "color-by-mean-inversion-rate",
+        help_heading = "Coloring"
+    )]
     color_by_mean_inversion_rate: bool,
 
     /// Change the color with respect to the uncalled bases.
-    #[arg(short = 'N', long = "color-by-uncalled-bases", help_heading = "Coloring")]
+    #[arg(
+        short = 'N',
+        long = "color-by-uncalled-bases",
+        help_heading = "Coloring"
+    )]
     color_by_uncalled_bases: bool,
 
     /// Color nodes listed in FILE in red and all other nodes in grey.
-    #[arg(short = 'J', long = "highlight-node-ids", value_name = "FILE", help_heading = "Coloring")]
+    #[arg(
+        short = 'J',
+        long = "highlight-node-ids",
+        value_name = "FILE",
+        help_heading = "Coloring"
+    )]
     highlight_node_ids: Option<PathBuf>,
 
     // === Binned Mode ===
     /// The bin width specifies the size of each bin in the binned mode.
-    #[arg(short = 'w', long = "bin-width", value_name = "bp", help_heading = "Binned Mode")]
+    #[arg(
+        short = 'w',
+        long = "bin-width",
+        value_name = "bp",
+        help_heading = "Binned Mode"
+    )]
     bin_width: Option<f64>,
 
     /// Automatically set width so each node/segment gets at least 1 pixel.
@@ -162,15 +319,29 @@ struct Args {
     show_all_nodes: bool,
 
     /// Minimum width in pixels for each node (use with --show-all-nodes, default: 1).
-    #[arg(long = "node-width", value_name = "N", default_value = "1", help_heading = "Binned Mode")]
+    #[arg(
+        long = "node-width",
+        value_name = "N",
+        default_value = "1",
+        help_heading = "Binned Mode"
+    )]
     node_width: u32,
 
     /// Change the color with respect to the mean coverage.
-    #[arg(short = 'm', long = "color-by-mean-depth", help_heading = "Binned Mode")]
+    #[arg(
+        short = 'm',
+        long = "color-by-mean-depth",
+        help_heading = "Binned Mode"
+    )]
     color_by_mean_depth: bool,
 
     /// Use the colorbrewer palette specified by SCHEME:N.
-    #[arg(short = 'B', long = "colorbrewer-palette", value_name = "SCHEME:N", help_heading = "Binned Mode")]
+    #[arg(
+        short = 'B',
+        long = "colorbrewer-palette",
+        value_name = "SCHEME:N",
+        help_heading = "Binned Mode"
+    )]
     colorbrewer_palette: Option<String>,
 
     /// Use the colorbrewer palette for <0.5x and ~1x coverage bins.
@@ -196,7 +367,12 @@ struct Args {
     compressed_mode: bool,
 
     /// Apply alignment related visual motifs to paths which have this name prefix.
-    #[arg(short = 'A', long = "alignment-prefix", value_name = "STRING", help_heading = "Special Modes")]
+    #[arg(
+        short = 'A',
+        long = "alignment-prefix",
+        value_name = "STRING",
+        help_heading = "Special Modes"
+    )]
     alignment_prefix: Option<String>,
 
     // === X-Axis ===
@@ -205,7 +381,12 @@ struct Args {
     x_axis: Option<String>,
 
     /// Number of ticks on the x-axis.
-    #[arg(long = "x-ticks", value_name = "N", default_value_t = 10, help_heading = "X-Axis")]
+    #[arg(
+        long = "x-ticks",
+        value_name = "N",
+        default_value_t = 10,
+        help_heading = "X-Axis"
+    )]
     x_ticks: u32,
 
     /// Show absolute coordinates by adding the subpath start position (from name:start-end format). Cannot be used with "pangenomic".
@@ -214,11 +395,22 @@ struct Args {
 
     // === Performance ===
     /// Number of threads to use for parallel operations.
-    #[arg(short = 't', long = "threads", value_name = "N", help_heading = "Performance")]
+    #[arg(
+        short = 't',
+        long = "threads",
+        value_name = "N",
+        help_heading = "Performance"
+    )]
     threads: Option<usize>,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug).
-    #[arg(short = 'v', long = "verbose", value_name = "N", default_value_t = 1, help_heading = "Performance")]
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        value_name = "N",
+        default_value_t = 1,
+        help_heading = "Performance"
+    )]
     verbose: u8,
 }
 
@@ -226,7 +418,7 @@ struct Args {
 #[derive(Debug, Clone)]
 struct Segment {
     sequence_len: u64,
-    n_count: u64,  // Number of uncalled bases (N's) in the sequence
+    n_count: u64, // Number of uncalled bases (N's) in the sequence
 }
 
 /// An edge between two segments
@@ -567,7 +759,10 @@ fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
                 let n_count = seq.bytes().filter(|&b| b == b'N' || b == b'n').count() as u64;
                 let id = graph.segments.len() as u64;
                 graph.segment_name_to_id.insert(name, id);
-                graph.segments.push(Segment { sequence_len: seq_len, n_count });
+                graph.segments.push(Segment {
+                    sequence_len: seq_len,
+                    n_count,
+                });
             }
         }
     }
@@ -587,7 +782,8 @@ fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
     );
 
     // Use a set to deduplicate edges
-    let mut edge_set: std::collections::HashSet<(u64, bool, u64, bool)> = std::collections::HashSet::new();
+    let mut edge_set: std::collections::HashSet<(u64, bool, u64, bool)> =
+        std::collections::HashSet::new();
 
     // Second pass: collect paths and edges (from L-lines)
     let file2 = File::open(path)?;
@@ -606,19 +802,25 @@ fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
                     if seg.is_empty() {
                         continue;
                     }
-                    let (name, is_reverse) = if seg.ends_with('+') {
-                        (&seg[..seg.len() - 1], false)
-                    } else if seg.ends_with('-') {
-                        (&seg[..seg.len() - 1], true)
+                    let (name, is_reverse) = if let Some(stripped) = seg.strip_suffix('+') {
+                        (stripped, false)
+                    } else if let Some(stripped) = seg.strip_suffix('-') {
+                        (stripped, true)
                     } else {
                         (seg, false)
                     };
                     if let Some(&id) = graph.segment_name_to_id.get(name) {
-                        steps.push(PathStep { segment_id: id, is_reverse });
+                        steps.push(PathStep {
+                            segment_id: id,
+                            is_reverse,
+                        });
                     }
                 }
 
-                graph.paths.push(GfaPath { name: path_name, steps });
+                graph.paths.push(GfaPath {
+                    name: path_name,
+                    steps,
+                });
             }
         } else if line.starts_with("W\t") {
             let parts: Vec<&str> = line.split('\t').collect();
@@ -644,13 +846,19 @@ fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
                         }
                         if !seg_name.is_empty() {
                             if let Some(&id) = graph.segment_name_to_id.get(&seg_name) {
-                                steps.push(PathStep { segment_id: id, is_reverse });
+                                steps.push(PathStep {
+                                    segment_id: id,
+                                    is_reverse,
+                                });
                             }
                         }
                     }
                 }
 
-                graph.paths.push(GfaPath { name: path_name, steps });
+                graph.paths.push(GfaPath {
+                    name: path_name,
+                    steps,
+                });
             }
         } else if line.starts_with("L\t") {
             // Parse edge: L<TAB>from<TAB>from_orient<TAB>to<TAB>to_orient<TAB>overlap
@@ -681,16 +889,30 @@ fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
             // Edge from end of 'from' to start of 'to'
             // from_rev=true means we're going through from in reverse, so edge starts from beginning
             // to_rev=true means we're entering to in reverse, so edge goes to end
-            edge_set.insert(edge_key(from.segment_id, from.is_reverse, to.segment_id, to.is_reverse));
+            edge_set.insert(edge_key(
+                from.segment_id,
+                from.is_reverse,
+                to.segment_id,
+                to.is_reverse,
+            ));
         }
     }
 
     // Convert edge set to vector
     for (from_id, from_rev, to_id, to_rev) in edge_set {
-        graph.edges.push(Edge { from_id, from_rev, to_id, to_rev });
+        graph.edges.push(Edge {
+            from_id,
+            from_rev,
+            to_id,
+            to_rev,
+        });
     }
 
-    info!("Found {} paths, {} edges", graph.paths.len(), graph.edges.len());
+    info!(
+        "Found {} paths, {} edges",
+        graph.paths.len(),
+        graph.edges.len()
+    );
 
     Ok(graph)
 }
@@ -888,26 +1110,27 @@ struct ClusteringResult {
     ordering: Vec<usize>,
     cluster_ids: Vec<usize>,
     num_clusters: usize,
-    representatives: Vec<usize>,  // medoid index (into original paths array) per cluster
-    cluster_sizes: Vec<usize>,    // member count per cluster
-    dendrogram: Option<Dendrogram>,  // hierarchical clustering tree
+    representatives: Vec<usize>, // medoid index (into original paths array) per cluster
+    cluster_sizes: Vec<usize>,   // member count per cluster
+    dendrogram: Option<Dendrogram>, // hierarchical clustering tree
 }
 
 /// A node in the dendrogram tree
 #[derive(Clone, Debug)]
 struct DendrogramNode {
-    left: usize,      // index of left child (< n means leaf, >= n means internal node)
-    right: usize,     // index of right child
-    height: f64,      // merge height (distance at which clusters merged)
-    size: usize,      // number of leaves in this subtree
+    left: usize,  // index of left child (< n means leaf, >= n means internal node)
+    right: usize, // index of right child
+    height: f64,  // merge height (distance at which clusters merged)
+    #[allow(dead_code)]
+    size: usize, // number of leaves in this subtree
 }
 
 /// Dendrogram structure for hierarchical clustering visualization
 #[derive(Clone, Debug)]
 struct Dendrogram {
-    nodes: Vec<DendrogramNode>,  // internal nodes (n-1 nodes for n leaves)
-    leaf_order: Vec<usize>,      // optimal leaf ordering for visualization
-    max_height: f64,             // maximum merge height
+    nodes: Vec<DendrogramNode>, // internal nodes (n-1 nodes for n leaves)
+    leaf_order: Vec<usize>,     // optimal leaf ordering for visualization
+    max_height: f64,            // maximum merge height
 }
 
 /// Build a dendrogram using UPGMA (Unweighted Pair Group Method with Arithmetic Mean)
@@ -967,17 +1190,19 @@ fn build_dendrogram(dist_matrix: &[Vec<f64>], cluster_assignments: Option<&[usiz
         // First pass: look for merges within same DBSCAN cluster
         if cluster_assignments.is_some() {
             for i in 0..n {
-                if cluster_id[i] < 0 { continue; }
+                if cluster_id[i] < 0 {
+                    continue;
+                }
                 for j in (i + 1)..n {
-                    if cluster_id[j] < 0 { continue; }
+                    if cluster_id[j] < 0 {
+                        continue;
+                    }
                     // Only consider if both are in the same DBSCAN cluster
-                    if dbscan_cluster[i] == dbscan_cluster[j] {
-                        if dists[i][j] < min_dist {
-                            min_dist = dists[i][j];
-                            min_i = i;
-                            min_j = j;
-                            found_same_cluster = true;
-                        }
+                    if dbscan_cluster[i] == dbscan_cluster[j] && dists[i][j] < min_dist {
+                        min_dist = dists[i][j];
+                        min_i = i;
+                        min_j = j;
+                        found_same_cluster = true;
                     }
                 }
             }
@@ -987,9 +1212,13 @@ fn build_dendrogram(dist_matrix: &[Vec<f64>], cluster_assignments: Option<&[usiz
         if !found_same_cluster {
             min_dist = f64::MAX;
             for i in 0..n {
-                if cluster_id[i] < 0 { continue; }
+                if cluster_id[i] < 0 {
+                    continue;
+                }
                 for j in (i + 1)..n {
-                    if cluster_id[j] < 0 { continue; }
+                    if cluster_id[j] < 0 {
+                        continue;
+                    }
                     if dists[i][j] < min_dist {
                         min_dist = dists[i][j];
                         min_i = i;
@@ -1010,7 +1239,7 @@ fn build_dendrogram(dist_matrix: &[Vec<f64>], cluster_assignments: Option<&[usiz
         nodes.push(DendrogramNode {
             left: left_id,
             right: right_id,
-            height: min_dist / 2.0,  // UPGMA uses half the distance as height
+            height: min_dist / 2.0, // UPGMA uses half the distance as height
             size: new_size,
         });
         max_height = max_height.max(min_dist / 2.0);
@@ -1025,9 +1254,12 @@ fn build_dendrogram(dist_matrix: &[Vec<f64>], cluster_assignments: Option<&[usiz
 
         // Update distances using UPGMA formula
         for k in 0..n {
-            if k == min_i || k == min_j || cluster_id[k] < 0 { continue; }
+            if k == min_i || k == min_j || cluster_id[k] < 0 {
+                continue;
+            }
             let new_dist = (dists[min_i][k] * left_size as f64
-                         + dists[min_j][k] * right_size as f64) / new_size as f64;
+                + dists[min_j][k] * right_size as f64)
+                / new_size as f64;
             dists[min_i][k] = new_dist;
             dists[k][min_i] = new_dist;
         }
@@ -1039,7 +1271,7 @@ fn build_dendrogram(dist_matrix: &[Vec<f64>], cluster_assignments: Option<&[usiz
     }
 
     // Get leaf order from the root (the last cluster ID created)
-    let root_cluster_id = (2 * n - 2) as usize;
+    let root_cluster_id = 2 * n - 2;
     let leaf_order = children.get(&root_cluster_id).cloned().unwrap_or_default();
 
     Dendrogram {
@@ -1115,7 +1347,7 @@ fn find_optimal_upgma_threshold(dendrogram: &Dendrogram, max_clusters: Option<us
     }
 
     let n_leaves = dendrogram.leaf_order.len();
-    let max_clusters = max_clusters.unwrap_or_else(|| (n_leaves + 8) / 9); // ~11% like DBSCAN
+    let max_clusters = max_clusters.unwrap_or_else(|| n_leaves.div_ceil(9)); // ~11% like DBSCAN
 
     // Collect all merge heights
     let mut heights: Vec<f64> = dendrogram.nodes.iter().map(|n| n.height).collect();
@@ -1130,8 +1362,10 @@ fn find_optimal_upgma_threshold(dendrogram: &Dendrogram, max_clusters: Option<us
 
         if num_clusters >= max_clusters {
             // Found a good threshold
-            debug!("UPGMA auto-threshold: {:.4} gives {} clusters (target: {})",
-                   threshold, num_clusters, max_clusters);
+            debug!(
+                "UPGMA auto-threshold: {:.4} gives {} clusters (target: {})",
+                threshold, num_clusters, max_clusters
+            );
             return threshold;
         }
     }
@@ -1250,15 +1484,26 @@ fn dbscan_cluster(dist_matrix: &[Vec<f64>], eps: f64) -> Vec<usize> {
 
 /// Find optimal eps using cosigt's stabilization detection
 /// Tests eps from 0.001 to 0.300, finds where cluster count stabilizes
-fn find_optimal_eps(dist_matrix: &[Vec<f64>], n_paths: usize, max_clusters_override: Option<usize>) -> f64 {
+fn find_optimal_eps(
+    dist_matrix: &[Vec<f64>],
+    n_paths: usize,
+    max_clusters_override: Option<usize>,
+) -> f64 {
     if dist_matrix.is_empty() {
         return 0.30;
     }
 
     // Determine max_clusters: use override if provided, otherwise ~11% of paths
-    let max_clusters = max_clusters_override.unwrap_or_else(|| (n_paths + 8) / 9);
-    debug!("DBSCAN max_clusters: {} ({})", max_clusters,
-           if max_clusters_override.is_some() { "user override" } else { "automatic" });
+    let max_clusters = max_clusters_override.unwrap_or_else(|| n_paths.div_ceil(9));
+    debug!(
+        "DBSCAN max_clusters: {} ({})",
+        max_clusters,
+        if max_clusters_override.is_some() {
+            "user override"
+        } else {
+            "automatic"
+        }
+    );
 
     // cosigt: pclust <- length(table(dbscan(distanceMatrix, eps = 0, minPts = 1)$cluster))
     let mut prev_clusters = dbscan_count_clusters(dist_matrix, 0.0);
@@ -1271,23 +1516,28 @@ fn find_optimal_eps(dist_matrix: &[Vec<f64>], n_paths: usize, max_clusters_overr
 
         // cosigt: if (abs(pclust - cclust) <= 1)
         let change = (prev_clusters as i64 - curr_clusters as i64).abs();
-        debug!("DBSCAN eps scan: eps={:.3} -> {} clusters (change={} from prev={}, max_allowed={})", eps, curr_clusters, change, prev_clusters, max_clusters);
+        debug!(
+            "DBSCAN eps scan: eps={:.3} -> {} clusters (change={} from prev={}, max_allowed={})",
+            eps, curr_clusters, change, prev_clusters, max_clusters
+        );
 
         // Modified stabilization: also accept when we first reach <= max_clusters
         // This captures cases where cluster count jumps directly to the target
         let first_hit_max = prev_clusters > max_clusters && curr_clusters <= max_clusters;
 
-        if change <= 1 || first_hit_max {
-            if curr_clusters <= max_clusters {
-                if first_hit_max && change > 1 {
-                    debug!("DBSCAN: first hit max_clusters at eps {:.3} with {} clusters (jumped from {})",
-                           eps, curr_clusters, prev_clusters);
-                } else {
-                    debug!("DBSCAN: stabilized at eps {:.3} with {} clusters (max allowed: {})",
-                           eps, curr_clusters, max_clusters);
-                }
-                return eps;
+        if (change <= 1 || first_hit_max) && curr_clusters <= max_clusters {
+            if first_hit_max && change > 1 {
+                debug!(
+                    "DBSCAN: first hit max_clusters at eps {:.3} with {} clusters (jumped from {})",
+                    eps, curr_clusters, prev_clusters
+                );
+            } else {
+                debug!(
+                    "DBSCAN: stabilized at eps {:.3} with {} clusters (max allowed: {})",
+                    eps, curr_clusters, max_clusters
+                );
             }
+            return eps;
         }
         prev_clusters = curr_clusters;
     }
@@ -1301,10 +1551,10 @@ fn find_optimal_eps(dist_matrix: &[Vec<f64>], n_paths: usize, max_clusters_overr
 /// For each node: add min(bp_a_on_node, bp_b_on_node) to intersection
 /// jaccard = intersection / (bp_a + bp_b - intersection)
 fn weighted_jaccard_similarity(
-    counts_a: &FxHashMap<u64, u64>,  // node_id -> total bp on that node for path a
-    counts_b: &FxHashMap<u64, u64>,  // node_id -> total bp on that node for path b
-    bp_a: u64,  // total bp in path a
-    bp_b: u64,  // total bp in path b
+    counts_a: &FxHashMap<u64, u64>, // node_id -> total bp on that node for path a
+    counts_b: &FxHashMap<u64, u64>, // node_id -> total bp on that node for path b
+    bp_a: u64,                      // total bp in path a
+    bp_b: u64,                      // total bp in path b
 ) -> f64 {
     if bp_a == 0 && bp_b == 0 {
         return 1.0;
@@ -1339,7 +1589,7 @@ fn jaccard_to_edr(jaccard: f64) -> f64 {
 /// Otherwise uses DBSCAN (matching cosigt exactly)
 fn cluster_paths_by_similarity(
     paths: &[&GfaPath],
-    segment_lengths: &[u64],  // segment_id -> length (0-indexed by segment_id - 1)
+    segment_lengths: &[u64], // segment_id -> length (0-indexed by segment_id - 1)
     threshold: Option<f64>,
     use_all_nodes: bool,
     max_clusters: Option<usize>,
@@ -1367,7 +1617,10 @@ fn cluster_paths_by_similarity(
         .map(|path| {
             let mut counts: FxHashMap<u64, u64> = FxHashMap::default();
             for step in &path.steps {
-                let seg_len = segment_lengths.get(step.segment_id as usize).copied().unwrap_or(0);
+                let seg_len = segment_lengths
+                    .get(step.segment_id as usize)
+                    .copied()
+                    .unwrap_or(0);
                 *counts.entry(step.segment_id).or_insert(0) += seg_len;
             }
             counts
@@ -1385,7 +1638,10 @@ fn cluster_paths_by_similarity(
 
     // Determine which nodes to use for clustering (based on bp variation, not just count)
     let nodes_to_use: FxHashSet<u64> = if use_all_nodes {
-        debug!("Clustering mode: --cluster-all-nodes (using all {} nodes)", total_unique_nodes);
+        debug!(
+            "Clustering mode: --cluster-all-nodes (using all {} nodes)",
+            total_unique_nodes
+        );
         all_nodes
     } else {
         // Find variable nodes: nodes where bp count varies across paths
@@ -1393,9 +1649,10 @@ fn cluster_paths_by_similarity(
             .into_iter()
             .filter(|&node| {
                 let first_bp = path_bp_counts[0].get(&node).copied().unwrap_or(0);
-                path_bp_counts.iter().skip(1).any(|counts| {
-                    counts.get(&node).copied().unwrap_or(0) != first_bp
-                })
+                path_bp_counts
+                    .iter()
+                    .skip(1)
+                    .any(|counts| counts.get(&node).copied().unwrap_or(0) != first_bp)
             })
             .collect();
 
@@ -1421,9 +1678,15 @@ fn cluster_paths_by_similarity(
     // When using all nodes, use full path lengths (matching odgi)
     // When using variable nodes only, use filtered lengths (consistent intersection/denominator)
     let total_bp: Vec<u64> = if use_all_nodes {
-        path_bp_counts.iter().map(|counts| counts.values().sum()).collect()
+        path_bp_counts
+            .iter()
+            .map(|counts| counts.values().sum())
+            .collect()
     } else {
-        filtered_bp_counts.iter().map(|counts| counts.values().sum()).collect()
+        filtered_bp_counts
+            .iter()
+            .map(|counts| counts.values().sum())
+            .collect()
     };
 
     // Build full pairwise EDR matrix (matching cosigt: uses normalized EDR)
@@ -1462,9 +1725,10 @@ fn cluster_paths_by_similarity(
             total_bp[*i],
             total_bp[*j],
         );
-        debug!("EDR: {} vs {} = {:.6} (jaccard={:.6}, bp_a={}, bp_b={})",
-               paths[*i].name, paths[*j].name, edr, jaccard,
-               total_bp[*i], total_bp[*j]);
+        debug!(
+            "EDR: {} vs {} = {:.6} (jaccard={:.6}, bp_a={}, bp_b={})",
+            paths[*i].name, paths[*j].name, edr, jaccard, total_bp[*i], total_bp[*j]
+        );
     }
 
     // Build normalized distance matrix (like cosigt: normRegularMatrix <- regularMatrix / maxD)
@@ -1484,17 +1748,25 @@ fn cluster_paths_by_similarity(
     }
     all_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
     if !all_dists.is_empty() {
-        debug!("Distance range: {:.3} - {:.3}", all_dists[0], all_dists[all_dists.len() - 1]);
+        debug!(
+            "Distance range: {:.3} - {:.3}",
+            all_dists[0],
+            all_dists[all_dists.len() - 1]
+        );
         if all_dists.len() >= 4 {
             let q1 = all_dists[all_dists.len() / 4];
             let median = all_dists[all_dists.len() / 2];
             let q3 = all_dists[3 * all_dists.len() / 4];
-            debug!("Distance quartiles: Q1={:.3}, median={:.3}, Q3={:.3}", q1, median, q3);
+            debug!(
+                "Distance quartiles: Q1={:.3}, median={:.3}, Q3={:.3}",
+                q1, median, q3
+            );
         }
     }
 
     // Get cluster assignments using either UPGMA or DBSCAN
-    let (cluster_assignments, dendrogram_for_upgma): (Vec<usize>, Option<Dendrogram>) = if use_upgma {
+    let (cluster_assignments, dendrogram_for_upgma): (Vec<usize>, Option<Dendrogram>) = if use_upgma
+    {
         // Pure UPGMA mode: build dendrogram first, then cut at threshold
         debug!("Using UPGMA hierarchical clustering");
         let dg = build_dendrogram(&dist_matrix, None); // No DBSCAN constraint for pure UPGMA
@@ -1510,7 +1782,10 @@ fn cluster_paths_by_similarity(
 
         let clusters = cut_dendrogram_at_height(&dg, cut_threshold);
         let num_clusters = clusters.iter().max().map(|&m| m + 1).unwrap_or(1);
-        debug!("UPGMA cut at height {:.4} gives {} clusters", cut_threshold, num_clusters);
+        debug!(
+            "UPGMA cut at height {:.4} gives {} clusters",
+            cut_threshold, num_clusters
+        );
 
         (clusters, Some(dg))
     } else {
@@ -1534,7 +1809,11 @@ fn cluster_paths_by_similarity(
         (clusters, None)
     };
 
-    let num_clusters = cluster_assignments.iter().max().map(|&m| m + 1).unwrap_or(1);
+    let num_clusters = cluster_assignments
+        .iter()
+        .max()
+        .map(|&m| m + 1)
+        .unwrap_or(1);
 
     // Group paths by cluster
     let mut cluster_members: Vec<Vec<usize>> = vec![Vec::new(); num_clusters];
@@ -1543,7 +1822,7 @@ fn cluster_paths_by_similarity(
     }
 
     // Sort clusters by size (largest first) for consistent ordering
-    cluster_members.sort_by(|a, b| b.len().cmp(&a.len()));
+    cluster_members.sort_by_key(|v| std::cmp::Reverse(v.len()));
 
     // Compute medoid for each cluster (path with minimum average distance to others)
     let mut representatives: Vec<usize> = Vec::with_capacity(num_clusters);
@@ -1606,7 +1885,8 @@ fn cluster_paths_by_similarity(
             final_cluster_ids.push(cluster_id);
             let mut current = start;
 
-            while ordering.len() < ordering.capacity() && placed.iter().filter(|&&p| !p).count() > 0 {
+            while ordering.len() < ordering.capacity() && placed.iter().filter(|&&p| !p).count() > 0
+            {
                 // Find nearest unplaced member within this cluster
                 let current_global = members[current];
                 let mut best_local = None;
@@ -1634,7 +1914,11 @@ fn cluster_paths_by_similarity(
         }
     }
 
-    debug!("Final ordering: {} paths in {} clusters", ordering.len(), num_clusters);
+    debug!(
+        "Final ordering: {} paths in {} clusters",
+        ordering.len(),
+        num_clusters
+    );
 
     // Build or reuse dendrogram
     let dendrogram = if use_upgma {
@@ -1677,13 +1961,23 @@ fn cluster_paths_by_similarity(
 struct BinInfo {
     mean_depth: f64,
     mean_inv: f64,
-    mean_pos: f64,       // mean position within path (for darkness gradient)
-    mean_uncalled: f64,  // proportion of uncalled bases (N's) in bin
-    highlighted: bool,   // whether this bin contains highlighted nodes
+    mean_pos: f64,      // mean position within path (for darkness gradient)
+    mean_uncalled: f64, // proportion of uncalled bases (N's) in bin
+    highlighted: bool,  // whether this bin contains highlighted nodes
 }
 
 /// Draw a line on the buffer (Bresenham's algorithm)
-fn draw_line(buffer: &mut [u8], width: u32, x0: i32, y0: i32, x1: i32, y1: i32, r: u8, g: u8, b: u8) {
+fn draw_line(
+    buffer: &mut [u8],
+    width: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
     let dx = (x1 - x0).abs();
     let dy = -(y1 - y0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
@@ -1702,7 +1996,9 @@ fn draw_line(buffer: &mut [u8], width: u32, x0: i32, y0: i32, x1: i32, y1: i32, 
                 buffer[idx + 3] = 255;
             }
         }
-        if x == x1 && y == y1 { break; }
+        if x == x1 && y == y1 {
+            break;
+        }
         let e2 = 2 * err;
         if e2 >= dy {
             err += dy;
@@ -1743,12 +2039,26 @@ fn render_dendrogram_node(
 
     // Recursively get positions of children
     let (left_y, _left_h) = render_dendrogram_node(
-        buffer, width, dendrogram, node.left, n_leaves,
-        x_offset, dendro_width, pix_per_path, leaf_y_positions
+        buffer,
+        width,
+        dendrogram,
+        node.left,
+        n_leaves,
+        x_offset,
+        dendro_width,
+        pix_per_path,
+        leaf_y_positions,
     );
     let (right_y, _right_h) = render_dendrogram_node(
-        buffer, width, dendrogram, node.right, n_leaves,
-        x_offset, dendro_width, pix_per_path, leaf_y_positions
+        buffer,
+        width,
+        dendrogram,
+        node.right,
+        n_leaves,
+        x_offset,
+        dendro_width,
+        pix_per_path,
+        leaf_y_positions,
     );
 
     // Calculate X position based on merge height
@@ -1761,12 +2071,14 @@ fn render_dendrogram_node(
 
     // Draw horizontal lines from children to this node's X
     let left_x = if node.left < n_leaves {
-        x_offset + dendro_width - 2  // Leaves are at the right edge
+        x_offset + dendro_width - 2 // Leaves are at the right edge
     } else {
         let left_internal = node.left - n_leaves;
         if left_internal < dendrogram.nodes.len() {
             let left_node = &dendrogram.nodes[left_internal];
-            x_offset + ((1.0 - left_node.height / dendrogram.max_height) * (dendro_width - 5) as f64) as u32
+            x_offset
+                + ((1.0 - left_node.height / dendrogram.max_height) * (dendro_width - 5) as f64)
+                    as u32
         } else {
             x_offset + dendro_width / 2
         }
@@ -1777,7 +2089,9 @@ fn render_dendrogram_node(
         let right_internal = node.right - n_leaves;
         if right_internal < dendrogram.nodes.len() {
             let right_node = &dendrogram.nodes[right_internal];
-            x_offset + ((1.0 - right_node.height / dendrogram.max_height) * (dendro_width - 5) as f64) as u32
+            x_offset
+                + ((1.0 - right_node.height / dendrogram.max_height) * (dendro_width - 5) as f64)
+                    as u32
         } else {
             x_offset + dendro_width / 2
         }
@@ -1787,14 +2101,41 @@ fn render_dendrogram_node(
     let line_color = (80u8, 80u8, 80u8);
 
     // Horizontal line from left child to this X
-    draw_line(buffer, width, left_x as i32, left_y as i32, x as i32, left_y as i32,
-              line_color.0, line_color.1, line_color.2);
+    draw_line(
+        buffer,
+        width,
+        left_x as i32,
+        left_y as i32,
+        x as i32,
+        left_y as i32,
+        line_color.0,
+        line_color.1,
+        line_color.2,
+    );
     // Horizontal line from right child to this X
-    draw_line(buffer, width, right_x as i32, right_y as i32, x as i32, right_y as i32,
-              line_color.0, line_color.1, line_color.2);
+    draw_line(
+        buffer,
+        width,
+        right_x as i32,
+        right_y as i32,
+        x as i32,
+        right_y as i32,
+        line_color.0,
+        line_color.1,
+        line_color.2,
+    );
     // Vertical line connecting the two horizontal lines
-    draw_line(buffer, width, x as i32, left_y as i32, x as i32, right_y as i32,
-              line_color.0, line_color.1, line_color.2);
+    draw_line(
+        buffer,
+        width,
+        x as i32,
+        left_y as i32,
+        x as i32,
+        right_y as i32,
+        line_color.0,
+        line_color.1,
+        line_color.2,
+    );
 
     // Return the midpoint Y
     let mid_y = (left_y + right_y) / 2;
@@ -1818,13 +2159,19 @@ fn render_dendrogram_png(
     // Number of leaves from the dendrogram
     let n_leaves = dendrogram.leaf_order.len();
 
-
     // Root is the last internal node
     let root_idx = n_leaves + dendrogram.nodes.len() - 1;
 
     render_dendrogram_node(
-        buffer, width, dendrogram, root_idx, n_leaves,
-        0, dendro_width, pix_per_path, leaf_y_positions
+        buffer,
+        width,
+        dendrogram,
+        root_idx,
+        n_leaves,
+        0,
+        dendro_width,
+        pix_per_path,
+        leaf_y_positions,
     );
 }
 
@@ -1854,12 +2201,24 @@ fn render_dendrogram_node_svg(
 
     // Recursively get positions of children
     let (left_y, _) = render_dendrogram_node_svg(
-        dendrogram, node.left, n_leaves,
-        x_offset, dendro_width, pix_per_path, leaf_y_positions, paths
+        dendrogram,
+        node.left,
+        n_leaves,
+        x_offset,
+        dendro_width,
+        pix_per_path,
+        leaf_y_positions,
+        paths,
     );
     let (right_y, _) = render_dendrogram_node_svg(
-        dendrogram, node.right, n_leaves,
-        x_offset, dendro_width, pix_per_path, leaf_y_positions, paths
+        dendrogram,
+        node.right,
+        n_leaves,
+        x_offset,
+        dendro_width,
+        pix_per_path,
+        leaf_y_positions,
+        paths,
     );
 
     // Calculate X position based on merge height
@@ -1932,8 +2291,14 @@ fn render_dendrogram_svg(
     let mut paths = Vec::new();
 
     render_dendrogram_node_svg(
-        dendrogram, root_idx, n_leaves,
-        0.0, dendro_width, pix_per_path, leaf_y_positions, &mut paths
+        dendrogram,
+        root_idx,
+        n_leaves,
+        0.0,
+        dendro_width,
+        pix_per_path,
+        leaf_y_positions,
+        &mut paths,
     );
 
     paths.join("\n")
@@ -1946,7 +2311,9 @@ fn write_char(
     base_y: u32,
     char_data: &[u8; 8],
     char_size: u32,
-    r: u8, g: u8, b: u8,
+    r: u8,
+    g: u8,
+    b: u8,
 ) {
     let ratio = char_size / 8;
     for j in 0..8u32 {
@@ -1979,7 +2346,9 @@ fn add_path_step(
     x: u32,
     y_start: u32,
     pix_per_path: u32,
-    r: u8, g: u8, b: u8,
+    r: u8,
+    g: u8,
+    b: u8,
     no_path_borders: bool,
     black_border: bool,
 ) {
@@ -2031,7 +2400,11 @@ fn add_edge_point(buffer: &mut [u8], width: u32, x: u32, y: u32, path_space: u32
 }
 
 /// Get color for depth using colorbrewer palette (with optional grey for low coverage)
-fn get_depth_color(mean_depth: f64, no_grey_depth: bool, palette: Option<&[(u8, u8, u8)]>) -> (u8, u8, u8) {
+fn get_depth_color(
+    mean_depth: f64,
+    no_grey_depth: bool,
+    palette: Option<&[(u8, u8, u8)]>,
+) -> (u8, u8, u8) {
     // Use custom palette if provided, otherwise use Spectral
     if let Some(pal) = palette {
         // Custom palette: distribute colors evenly across depth range
@@ -2064,7 +2437,9 @@ fn get_depth_color(mean_depth: f64, no_grey_depth: bool, palette: Option<&[(u8, 
         COLORBREWER_SPECTRAL_13[12]
     } else {
         // Default: use grey for low coverage (indices 0-1), Spectral for rest
-        let cuts = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5];
+        let cuts = [
+            0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5,
+        ];
         for (i, &cut) in cuts.iter().enumerate() {
             if mean_depth <= cut {
                 return COLORBREWER_SPECTRAL_13[i];
@@ -2094,7 +2469,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             display_paths.retain(|p| ptd_set.contains(&p.name));
             let path_map: FxHashMap<&String, &GfaPath> =
                 display_paths.iter().map(|p| (&p.name, *p)).collect();
-            display_paths = ptd.iter().filter_map(|name| path_map.get(name).copied()).collect();
+            display_paths = ptd
+                .iter()
+                .filter_map(|name| path_map.get(name).copied())
+                .collect();
         }
     }
 
@@ -2104,17 +2482,31 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let len_to_visualize = graph.total_length;
     let viz_width = args.width.min(len_to_visualize as u32);
 
-    let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
+    let bin_width = args
+        .bin_width
+        .unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
     let _scale_x = 1.0; // In binned mode
     let _scale_y = viz_width as f64 / len_to_visualize as f64;
 
     // Cluster paths by similarity if requested (PNG rendering)
     let cluster_result = if args.cluster_paths {
-        debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
+        debug!(
+            "Clustering {} paths by EDR (estimated difference rate)",
+            display_paths.len()
+        );
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
         let original_paths = display_paths.clone(); // Save for medoids TSV
-        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters, args.dendrogram || args.use_upgma, args.use_upgma, args.upgma_threshold);
+        let result = cluster_paths_by_similarity(
+            &display_paths,
+            &segment_lengths,
+            args.cluster_threshold,
+            args.cluster_all_nodes,
+            args.max_clusters,
+            args.dendrogram || args.use_upgma,
+            args.use_upgma,
+            args.upgma_threshold,
+        );
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
@@ -2164,7 +2556,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         let paths_vec: Vec<GfaPath> = display_paths.iter().map(|&p| p.clone()).collect();
         match load_prefix_merges(p, &paths_vec) {
             Ok(grouping) => {
-                info!("Read {} valid prefixes for {} groups", grouping.prefixes.len(), grouping.num_groups);
+                info!(
+                    "Read {} valid prefixes for {} groups",
+                    grouping.prefixes.len(),
+                    grouping.num_groups
+                );
                 Some(grouping)
             }
             Err(e) => {
@@ -2194,20 +2590,36 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
     } else if args.cluster_representatives {
         // Account for " (n=X)" suffix: max cluster size determines suffix length
-        let max_size = cluster_result.as_ref().map(|cr| cr.cluster_sizes.iter().max().copied().unwrap_or(1)).unwrap_or(1);
+        let max_size = cluster_result
+            .as_ref()
+            .map(|cr| cr.cluster_sizes.iter().max().copied().unwrap_or(1))
+            .unwrap_or(1);
         let suffix_len = format!(" (n={})", max_size).len();
-        display_paths.iter().map(|p| p.name.len() + suffix_len).max().unwrap_or(10)
+        display_paths
+            .iter()
+            .map(|p| p.name.len() + suffix_len)
+            .max()
+            .unwrap_or(10)
     } else {
-        display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
+        display_paths
+            .iter()
+            .map(|p| p.name.len())
+            .max()
+            .unwrap_or(10)
     };
     let max_num_of_chars = args.max_num_of_characters.unwrap_or(max_name_len.min(128));
-    let char_size = ((pix_per_path / 8) * 8).min(64).max(8);
+    let char_size = ((pix_per_path / 8) * 8).clamp(8, 64);
 
     // Cluster bar width (only if clustering is enabled)
     let cluster_bar_width: u32 = if cluster_result.is_some() { 10 } else { 0 };
 
     // Dendrogram width (only if dendrogram is enabled and we have a dendrogram)
-    let dendrogram_width: u32 = if args.dendrogram && cluster_result.as_ref().map(|cr| cr.dendrogram.is_some()).unwrap_or(false) {
+    let dendrogram_width: u32 = if args.dendrogram
+        && cluster_result
+            .as_ref()
+            .map(|cr| cr.dendrogram.is_some())
+            .unwrap_or(false)
+    {
         args.dendrogram_width
     } else {
         0
@@ -2273,7 +2685,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     if orig_idx < n_leaves && display_pos < cr.cluster_ids.len() {
                         // cluster_ids is indexed by display position, not original index
                         let cluster_id = cr.cluster_ids[display_pos];
-                        if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+                        if prev_cluster_id.is_some_and(|prev| prev != cluster_id) {
                             cumulative_gap += args.cluster_gap;
                         }
                         prev_cluster_id = Some(cluster_id);
@@ -2326,16 +2738,23 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
     // Calculate max path length for longest-path option
     let max_path_length: u64 = if args.longest_path || args.change_darkness {
-        display_paths.iter().map(|path| {
-            path.steps.iter().map(|step| {
-                let seg_id = step.segment_id as usize;
-                if seg_id < graph.segments.len() {
-                    graph.segments[seg_id].sequence_len
-                } else {
-                    0
-                }
-            }).sum::<u64>()
-        }).max().unwrap_or(1)
+        display_paths
+            .iter()
+            .map(|path| {
+                path.steps
+                    .iter()
+                    .map(|step| {
+                        let seg_id = step.segment_id as usize;
+                        if seg_id < graph.segments.len() {
+                            graph.segments[seg_id].sequence_len
+                        } else {
+                            0
+                        }
+                    })
+                    .sum::<u64>()
+            })
+            .max()
+            .unwrap_or(1)
     } else {
         1
     };
@@ -2384,19 +2803,47 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             let base_y = y_start + pix_per_path / 2 - char_size / 2;
             for (i, c) in display_name.chars().take(num_of_chars).enumerate() {
-                let base_x = (left_padding + i) as u32 * char_size + 3 + dendrogram_width + cluster_bar_width;
+                let base_x = (left_padding + i) as u32 * char_size
+                    + 3
+                    + dendrogram_width
+                    + cluster_bar_width;
                 let c_byte = c as usize;
-                let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
-                write_char(&mut path_names_buffer, path_names_width, base_x, base_y, char_data, char_size, 0, 0, 0);
+                let char_data = if c_byte < 128 {
+                    &FONT_5X8[c_byte]
+                } else {
+                    &FONT_5X8[b'?' as usize]
+                };
+                write_char(
+                    &mut path_names_buffer,
+                    path_names_width,
+                    base_x,
+                    base_y,
+                    char_data,
+                    char_size,
+                    0,
+                    0,
+                    0,
+                );
             }
         }
 
         // Render aggregated bins (PNG compressed mode)
         for (bin_idx, mean_depth) in &compressed_bins {
             let x = (*bin_idx as u32).min(viz_width - 1);
-            let (r, g, b) = get_depth_color(*mean_depth, args.no_grey_depth, Some(compressed_palette));
-            add_path_step(&mut buffer, total_width, x + path_names_width, y_start, pix_per_path,
-                r, g, b, args.no_path_borders, args.black_path_borders);
+            let (r, g, b) =
+                get_depth_color(*mean_depth, args.no_grey_depth, Some(compressed_palette));
+            add_path_step(
+                &mut buffer,
+                total_width,
+                x + path_names_width,
+                y_start,
+                pix_per_path,
+                r,
+                g,
+                b,
+                args.no_path_borders,
+                args.black_path_borders,
+            );
         }
     }
 
@@ -2424,8 +2871,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     let offset = graph.segment_offsets[seg_id];
                     let seg_len = graph.segments[seg_id].sequence_len;
                     let n_count = graph.segments[seg_id].n_count;
-                    let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
-                    let is_highlighted = highlight_nodes.as_ref().map_or(false, |hn| hn.contains(&step.segment_id));
+                    let n_proportion = if seg_len > 0 {
+                        n_count as f64 / seg_len as f64
+                    } else {
+                        0.0
+                    };
+                    let is_highlighted = highlight_nodes
+                        .as_ref()
+                        .is_some_and(|hn| hn.contains(&step.segment_id));
 
                     for k in 0..seg_len {
                         let pos = offset + k;
@@ -2435,10 +2888,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
                         let entry = bins.entry(curr_bin).or_default();
                         entry.mean_depth += 1.0;
-                        if step.is_reverse { entry.mean_inv += 1.0; }
+                        if step.is_reverse {
+                            entry.mean_inv += 1.0;
+                        }
                         entry.mean_pos += path_pos as f64;
                         entry.mean_uncalled += n_proportion;
-                        if is_highlighted { entry.highlighted = true; }
+                        if is_highlighted {
+                            entry.highlighted = true;
+                        }
                         path_pos += 1;
                     }
                 }
@@ -2450,7 +2907,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     v.mean_pos /= v.mean_depth;
                     v.mean_uncalled /= v.mean_depth;
                 }
-                v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
+                v.mean_inv /= if v.mean_depth > 0.0 {
+                    v.mean_depth
+                } else {
+                    1.0
+                };
                 v.mean_depth /= bin_width;
             }
 
@@ -2460,7 +2921,12 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 compute_path_color(&path.name, args.color_by_prefix)
             };
 
-            path_data.push(PathBinData { min_bin, max_bin, bins, color });
+            path_data.push(PathBinData {
+                min_bin,
+                max_bin,
+                bins,
+                color,
+            });
         }
 
         // Layout buffer: for each X position, track the lowest available row
@@ -2508,7 +2974,12 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
 
         let packed_rows = occupancy.len() as u32;
-        info!("Pack-paths: {} paths packed into {} rows (vs {} original)", display_paths.len(), packed_rows, path_count);
+        info!(
+            "Pack-paths: {} paths packed into {} rows (vs {} original)",
+            display_paths.len(),
+            packed_rows,
+            path_count
+        );
 
         // Resize buffer if packed height is different
         let packed_path_space = packed_rows * pix_per_path;
@@ -2522,18 +2993,34 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         for (path_idx, (pd, path)) in path_data.iter().zip(display_paths.iter()).enumerate() {
             let y_start = path_rows[path_idx] as u32 * pix_per_path;
             let (path_r, path_g, path_b) = pd.color;
-            let path_length: u64 = path.steps.iter().map(|step| {
-                let seg_id = step.segment_id as usize;
-                if seg_id < graph.segments.len() { graph.segments[seg_id].sequence_len } else { 0 }
-            }).sum();
-            let darkness_length = if args.longest_path { max_path_length } else { path_length };
+            let path_length: u64 = path
+                .steps
+                .iter()
+                .map(|step| {
+                    let seg_id = step.segment_id as usize;
+                    if seg_id < graph.segments.len() {
+                        graph.segments[seg_id].sequence_len
+                    } else {
+                        0
+                    }
+                })
+                .sum();
+            let darkness_length = if args.longest_path {
+                max_path_length
+            } else {
+                path_length
+            };
 
             for (bin_idx, bin_info) in &pd.bins {
                 let x = (*bin_idx as u32).min(viz_width - 1);
 
                 // Determine color (same logic as normal rendering)
                 let (r, g, b) = if highlight_nodes.is_some() {
-                    if bin_info.highlighted { (255, 0, 0) } else { (180, 180, 180) }
+                    if bin_info.highlighted {
+                        (255, 0, 0)
+                    } else {
+                        (180, 180, 180)
+                    }
                 } else if args.color_by_mean_depth {
                     get_depth_color(bin_info.mean_depth, args.no_grey_depth, depth_palette)
                 } else if args.color_by_mean_inversion_rate {
@@ -2543,30 +3030,66 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
                     (0, green, 0)
                 } else if args.show_strand {
-                    let apply_strand = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                    let apply_strand = args
+                        .alignment_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| path.name.starts_with(prefix));
                     if apply_strand {
-                        if bin_info.mean_inv > 0.5 { (200, 50, 50) } else { (50, 50, 200) }
-                    } else { (path_r, path_g, path_b) }
-                } else { (path_r, path_g, path_b) };
+                        if bin_info.mean_inv > 0.5 {
+                            (200, 50, 50)
+                        } else {
+                            (50, 50, 200)
+                        }
+                    } else {
+                        (path_r, path_g, path_b)
+                    }
+                } else {
+                    (path_r, path_g, path_b)
+                };
 
                 // Apply darkness gradient if enabled
-                let (r, g, b) = if args.change_darkness && !highlight_nodes.is_some() {
-                    let apply_darkness = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                let (r, g, b) = if args.change_darkness && highlight_nodes.is_none() {
+                    let apply_darkness = args
+                        .alignment_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| path.name.starts_with(prefix));
                     if apply_darkness && darkness_length > 0 {
                         let pos_factor = bin_info.mean_pos / darkness_length as f64;
-                        let darkness = if bin_info.mean_inv > 0.5 { 1.0 - pos_factor } else { pos_factor };
+                        let darkness = if bin_info.mean_inv > 0.5 {
+                            1.0 - pos_factor
+                        } else {
+                            pos_factor
+                        };
                         if args.white_to_black {
                             let gray = (255.0 * (1.0 - darkness)).round() as u8;
                             (gray, gray, gray)
                         } else {
                             let factor = 1.0 - (darkness * 0.8);
-                            ((r as f64 * factor).round() as u8, (g as f64 * factor).round() as u8, (b as f64 * factor).round() as u8)
+                            (
+                                (r as f64 * factor).round() as u8,
+                                (g as f64 * factor).round() as u8,
+                                (b as f64 * factor).round() as u8,
+                            )
                         }
-                    } else { (r, g, b) }
-                } else { (r, g, b) };
+                    } else {
+                        (r, g, b)
+                    }
+                } else {
+                    (r, g, b)
+                };
 
-                add_path_step(&mut buffer, total_width, x + path_names_width, y_start, pix_per_path,
-                    r, g, b, args.no_path_borders, args.black_path_borders);
+                add_path_step(
+                    &mut buffer,
+                    total_width,
+                    x + path_names_width,
+                    y_start,
+                    pix_per_path,
+                    r,
+                    g,
+                    b,
+                    args.no_path_borders,
+                    args.black_path_borders,
+                );
             }
 
             // Draw link lines between discontinuous path pieces
@@ -2583,7 +3106,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                         let curr_bin = sorted_bins[i];
 
                         if curr_bin > prev_bin + 1 {
-                            let x_start = (prev_bin as u32 + 1).min(viz_width - 1) + path_names_width;
+                            let x_start =
+                                (prev_bin as u32 + 1).min(viz_width - 1) + path_names_width;
                             let x_end = (curr_bin as u32).min(viz_width - 1) + path_names_width;
 
                             for lx in x_start..x_end {
@@ -2626,7 +3150,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             if first {
                 rendered_groups.insert(group_idx);
             }
-            (group_idx as u32, pg.prefixes[group_idx as usize].clone(), first)
+            (
+                group_idx as u32,
+                pg.prefixes[group_idx as usize].clone(),
+                first,
+            )
         } else {
             (path_idx as u32, path.name.clone(), true)
         };
@@ -2647,7 +3175,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         // Add gap before new cluster (except first)
         if let Some(ref cr) = cluster_result {
             let cluster_id = cr.cluster_ids[path_idx];
-            if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+            if prev_cluster_id.is_some_and(|prev| prev != cluster_id) {
                 cumulative_gap += cluster_gap;
             }
             prev_cluster_id = Some(cluster_id);
@@ -2661,15 +3189,24 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 let cluster_id = cr.cluster_ids[path_idx];
                 let (cr_r, cr_g, cr_b) = get_cluster_color(cluster_id);
                 for x in dendrogram_width..(dendrogram_width + cluster_bar_width) {
-                    add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
-                        cr_r, cr_g, cr_b, true, false); // no border for cluster bar
+                    add_path_step(
+                        &mut path_names_buffer,
+                        path_names_width,
+                        x,
+                        y_start,
+                        pix_per_path,
+                        cr_r,
+                        cr_g,
+                        cr_b,
+                        true,
+                        false,
+                    ); // no border for cluster bar
                 }
             }
         }
 
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
-            colors.get(&path.name).copied()
-                .unwrap_or((200, 200, 200)) // Light grey for non-specified paths
+            colors.get(&path.name).copied().unwrap_or((200, 200, 200)) // Light grey for non-specified paths
         } else {
             compute_path_color(&path.name, args.color_by_prefix)
         };
@@ -2681,23 +3218,52 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             let left_padding = max_num_of_chars - num_of_chars;
 
             if args.color_path_names_background {
-                for x in (left_padding as u32 * char_size + dendrogram_width + cluster_bar_width)..path_names_width {
-                    add_path_step(&mut path_names_buffer, path_names_width, x, y_start, pix_per_path,
-                        path_r, path_g, path_b, args.no_path_borders, args.black_path_borders);
+                for x in (left_padding as u32 * char_size + dendrogram_width + cluster_bar_width)
+                    ..path_names_width
+                {
+                    add_path_step(
+                        &mut path_names_buffer,
+                        path_names_width,
+                        x,
+                        y_start,
+                        pix_per_path,
+                        path_r,
+                        path_g,
+                        path_b,
+                        args.no_path_borders,
+                        args.black_path_borders,
+                    );
                 }
             }
 
             let base_y = y_start + pix_per_path / 2 - char_size / 2;
             for (i, c) in display_name.chars().take(num_of_chars).enumerate() {
                 // +3 offset to match odgi's text positioning, shifted by dendrogram + cluster_bar
-                let base_x = (left_padding + i) as u32 * char_size + 3 + dendrogram_width + cluster_bar_width;
+                let base_x = (left_padding + i) as u32 * char_size
+                    + 3
+                    + dendrogram_width
+                    + cluster_bar_width;
                 let char_data = if i == num_of_chars - 1 && path_name_too_long {
                     &TRAILING_DOTS
                 } else {
                     let c_byte = c as usize;
-                    if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] }
+                    if c_byte < 128 {
+                        &FONT_5X8[c_byte]
+                    } else {
+                        &FONT_5X8[b'?' as usize]
+                    }
                 };
-                write_char(&mut path_names_buffer, path_names_width, base_x, base_y, char_data, char_size, 0, 0, 0);
+                write_char(
+                    &mut path_names_buffer,
+                    path_names_width,
+                    base_x,
+                    base_y,
+                    char_data,
+                    char_size,
+                    0,
+                    0,
+                    0,
+                );
             }
         }
 
@@ -2705,15 +3271,23 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         let mut bins: FxHashMap<usize, BinInfo> = FxHashMap::default();
 
         // Calculate current path length for darkness gradient
-        let path_length: u64 = path.steps.iter().map(|step| {
-            let seg_id = step.segment_id as usize;
-            if seg_id < graph.segments.len() {
-                graph.segments[seg_id].sequence_len
-            } else {
-                0
-            }
-        }).sum();
-        let darkness_length = if args.longest_path { max_path_length } else { path_length };
+        let path_length: u64 = path
+            .steps
+            .iter()
+            .map(|step| {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    graph.segments[seg_id].sequence_len
+                } else {
+                    0
+                }
+            })
+            .sum();
+        let darkness_length = if args.longest_path {
+            max_path_length
+        } else {
+            path_length
+        };
 
         let mut path_pos: u64 = 0; // Track position within path
         for step in &path.steps {
@@ -2723,12 +3297,16 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 let seg_len = graph.segments[seg_id].sequence_len;
                 let n_count = graph.segments[seg_id].n_count;
                 // Proportion of N's in this segment (for uncalled base coloring)
-                let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
+                let n_proportion = if seg_len > 0 {
+                    n_count as f64 / seg_len as f64
+                } else {
+                    0.0
+                };
 
                 // Check if this segment is highlighted
                 let is_highlighted = highlight_nodes
                     .as_ref()
-                    .map_or(false, |hn| hn.contains(&step.segment_id));
+                    .is_some_and(|hn| hn.contains(&step.segment_id));
 
                 for k in 0..seg_len {
                     let pos = offset + k;
@@ -2754,7 +3332,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 v.mean_pos /= v.mean_depth;
                 v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
             }
-            v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
+            v.mean_inv /= if v.mean_depth > 0.0 {
+                v.mean_depth
+            } else {
+                1.0
+            };
             v.mean_depth /= bin_width;
         }
 
@@ -2783,9 +3365,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 (0, green, 0)
             } else if args.show_strand {
                 // Check if alignment_prefix applies (if set, only apply to matching paths)
-                let apply_strand = args.alignment_prefix
+                let apply_strand = args
+                    .alignment_prefix
                     .as_ref()
-                    .map_or(true, |prefix| path.name.starts_with(prefix));
+                    .is_none_or(|prefix| path.name.starts_with(prefix));
 
                 if apply_strand {
                     if bin_info.mean_inv > 0.5 {
@@ -2801,11 +3384,12 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             };
 
             // Apply darkness gradient if enabled
-            let (r, g, b) = if args.change_darkness && !highlight_nodes.is_some() {
+            let (r, g, b) = if args.change_darkness && highlight_nodes.is_none() {
                 // Check if alignment_prefix applies
-                let apply_darkness = args.alignment_prefix
+                let apply_darkness = args
+                    .alignment_prefix
                     .as_ref()
-                    .map_or(true, |prefix| path.name.starts_with(prefix));
+                    .is_none_or(|prefix| path.name.starts_with(prefix));
 
                 if apply_darkness && darkness_length > 0 {
                     // Calculate darkness factor based on position
@@ -2824,9 +3408,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     } else {
                         // Darken the path color
                         let factor = 1.0 - (darkness * 0.8); // darken up to 80%
-                        ((r as f64 * factor).round() as u8,
-                         (g as f64 * factor).round() as u8,
-                         (b as f64 * factor).round() as u8)
+                        (
+                            (r as f64 * factor).round() as u8,
+                            (g as f64 * factor).round() as u8,
+                            (b as f64 * factor).round() as u8,
+                        )
                     }
                 } else {
                     (r, g, b)
@@ -2835,8 +3421,18 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 (r, g, b)
             };
 
-            add_path_step(&mut buffer, total_width, x + path_names_width, y_start, pix_per_path,
-                r, g, b, args.no_path_borders, args.black_path_borders);
+            add_path_step(
+                &mut buffer,
+                total_width,
+                x + path_names_width,
+                y_start,
+                pix_per_path,
+                r,
+                g,
+                b,
+                args.no_path_borders,
+                args.black_path_borders,
+            );
         }
 
         // Draw link lines between discontinuous path pieces
@@ -2904,8 +3500,15 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         // Draw label text in path_names_buffer (aligned like path names, bold effect)
         if path_names_width > 0 && text_only_width > 0 {
             let max_label_chars = ((text_only_width) / char_size) as usize;
-            let display_label: String = if label_text.len() > max_label_chars && max_label_chars > 3 {
-                format!("{}...", &label_text.chars().take(max_label_chars.saturating_sub(3)).collect::<String>())
+            let display_label: String = if label_text.len() > max_label_chars && max_label_chars > 3
+            {
+                format!(
+                    "{}...",
+                    &label_text
+                        .chars()
+                        .take(max_label_chars.saturating_sub(3))
+                        .collect::<String>()
+                )
             } else {
                 label_text.chars().take(max_label_chars).collect()
             };
@@ -2916,13 +3519,40 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             for (i, c) in display_label.chars().enumerate() {
                 // +3 offset to match path name positioning, shifted by dendrogram + cluster_bar
-                let char_x = (left_padding + i) as u32 * char_size + 3 + dendrogram_width + cluster_bar_width;
+                let char_x = (left_padding + i) as u32 * char_size
+                    + 3
+                    + dendrogram_width
+                    + cluster_bar_width;
                 let c_byte = c as usize;
-                let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
+                let char_data = if c_byte < 128 {
+                    &FONT_5X8[c_byte]
+                } else {
+                    &FONT_5X8[b'?' as usize]
+                };
                 // Draw twice with 1-pixel offset for bold effect
-                write_char(&mut path_names_buffer, path_names_width, char_x, label_y, char_data, char_size, 0, 0, 0);
+                write_char(
+                    &mut path_names_buffer,
+                    path_names_width,
+                    char_x,
+                    label_y,
+                    char_data,
+                    char_size,
+                    0,
+                    0,
+                    0,
+                );
                 if char_x + 1 < path_names_width {
-                    write_char(&mut path_names_buffer, path_names_width, char_x + 1, label_y, char_data, char_size, 0, 0, 0);
+                    write_char(
+                        &mut path_names_buffer,
+                        path_names_width,
+                        char_x + 1,
+                        label_y,
+                        char_data,
+                        char_size,
+                        0,
+                        0,
+                        0,
+                    );
                 }
             }
         }
@@ -2951,29 +3581,32 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         // For path-based coordinates, find the path and use its length
         let (coord_start, coord_end) = if is_pangenomic {
             (0u64, len_to_visualize)
-        } else {
-            if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
-                let path_len: u64 = path.steps.iter()
-                    .map(|step| {
-                        let seg_id = step.segment_id as usize;
-                        if seg_id < graph.segments.len() {
-                            graph.segments[seg_id].sequence_len
-                        } else {
-                            0
-                        }
-                    })
-                    .sum();
-                // Add subpath start offset if --x-axis-absolute is enabled
-                let offset = if args.x_axis_absolute {
-                    parse_subpath_start(coord_system)
-                } else {
-                    0
-                };
-                (offset, offset + path_len)
+        } else if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
+            let path_len: u64 = path
+                .steps
+                .iter()
+                .map(|step| {
+                    let seg_id = step.segment_id as usize;
+                    if seg_id < graph.segments.len() {
+                        graph.segments[seg_id].sequence_len
+                    } else {
+                        0
+                    }
+                })
+                .sum();
+            // Add subpath start offset if --x-axis-absolute is enabled
+            let offset = if args.x_axis_absolute {
+                parse_subpath_start(coord_system)
             } else {
-                debug!("Path '{}' not found, using pangenomic coordinates", coord_system);
-                (0u64, len_to_visualize)
-            }
+                0
+            };
+            (offset, offset + path_len)
+        } else {
+            debug!(
+                "Path '{}' not found, using pangenomic coordinates",
+                coord_system
+            );
+            (0u64, len_to_visualize)
         };
 
         // Draw ticks and labels
@@ -3011,11 +3644,35 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 let char_x = label_x + (j as u32) * axis_char_size;
                 if char_x + axis_char_size <= total_width {
                     let c_byte = c as usize;
-                    let char_data = if c_byte < 128 { &FONT_5X8[c_byte] } else { &FONT_5X8[b'?' as usize] };
+                    let char_data = if c_byte < 128 {
+                        &FONT_5X8[c_byte]
+                    } else {
+                        &FONT_5X8[b'?' as usize]
+                    };
                     // Draw twice with 1-pixel offset for bold effect
-                    write_char(&mut buffer, total_width, char_x, label_y, char_data, axis_char_size, 0, 0, 0);
+                    write_char(
+                        &mut buffer,
+                        total_width,
+                        char_x,
+                        label_y,
+                        char_data,
+                        axis_char_size,
+                        0,
+                        0,
+                        0,
+                    );
                     if char_x + 1 + axis_char_size <= total_width {
-                        write_char(&mut buffer, total_width, char_x + 1, label_y, char_data, axis_char_size, 0, 0, 0);
+                        write_char(
+                            &mut buffer,
+                            total_width,
+                            char_x + 1,
+                            label_y,
+                            char_data,
+                            axis_char_size,
+                            0,
+                            0,
+                            0,
+                        );
                     }
                 }
             }
@@ -3052,7 +3709,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 to_offset as f64 / bin_width
             };
 
-            let (a, b) = if a_pos < b_pos { (a_pos, b_pos) } else { (b_pos, a_pos) };
+            let (a, b) = if a_pos < b_pos {
+                (a_pos, b_pos)
+            } else {
+                (b_pos, a_pos)
+            };
 
             // dist = (b - a) * bin_width (in bp), used for vertical extent
             // odgi calculates this as integer
@@ -3068,7 +3729,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             while i < dist as f64 {
                 let y = (i * scale_y_edges).round() as u32;
                 if y < edge_height {
-                    add_edge_point(&mut buffer, total_width, ax + path_names_width, y, path_space_with_axis, 0);
+                    add_edge_point(
+                        &mut buffer,
+                        total_width,
+                        ax + path_names_width,
+                        y,
+                        path_space_with_axis,
+                        0,
+                    );
                     max_y = max_y.max(path_space_with_axis + y + 1);
                 }
                 i += 1.0 / scale_y_edges;
@@ -3081,7 +3749,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             while x_f <= b {
                 let x = (x_f.round() as u32).min(viz_width.saturating_sub(1));
                 if x < viz_width {
-                    add_edge_point(&mut buffer, total_width, x + path_names_width, h, path_space_with_axis, 0);
+                    add_edge_point(
+                        &mut buffer,
+                        total_width,
+                        x + path_names_width,
+                        h,
+                        path_space_with_axis,
+                        0,
+                    );
                     max_y = max_y.max(path_space_with_axis + h + 1);
                 }
                 x_f += 1.0; // In binned mode, scale_x is effectively 1
@@ -3092,7 +3767,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             while j < dist as f64 {
                 let y = (j * scale_y_edges).round() as u32;
                 if y < edge_height {
-                    add_edge_point(&mut buffer, total_width, bx + path_names_width, y, path_space_with_axis, 0);
+                    add_edge_point(
+                        &mut buffer,
+                        total_width,
+                        bx + path_names_width,
+                        y,
+                        path_space_with_axis,
+                        0,
+                    );
                 }
                 j += 1.0 / scale_y_edges;
             }
@@ -3133,7 +3815,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
 /// Write clustering results to a TSV file
 fn write_cluster_tsv(
-    output_path: &PathBuf,
+    output_path: &Path,
     display_paths: &[&GfaPath],
     cluster_result: &ClusteringResult,
 ) {
@@ -3154,7 +3836,7 @@ fn write_cluster_tsv(
 
 /// Write cluster medoids (representatives) to a TSV file
 fn write_medoids_tsv(
-    output_path: &PathBuf,
+    output_path: &Path,
     original_paths: &[&GfaPath],
     cluster_result: &ClusteringResult,
 ) {
@@ -3253,7 +3935,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             display_paths.retain(|p| ptd_set.contains(&p.name));
             let path_map: FxHashMap<&String, &GfaPath> =
                 display_paths.iter().map(|p| (&p.name, *p)).collect();
-            display_paths = ptd.iter().filter_map(|name| path_map.get(name).copied()).collect();
+            display_paths = ptd
+                .iter()
+                .filter_map(|name| path_map.get(name).copied())
+                .collect();
         }
     }
 
@@ -3264,7 +3949,9 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Calculate width - if show_all_nodes, ensure smallest segment gets at least node_width pixels
     let viz_width = if args.show_all_nodes {
         // Find the smallest segment length
-        let min_seg_len = graph.segments.iter()
+        let min_seg_len = graph
+            .segments
+            .iter()
             .map(|s| s.sequence_len)
             .filter(|&len| len > 0)
             .min()
@@ -3273,24 +3960,40 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         // Calculate width needed so smallest segment gets node_width pixels
         // bin_width = total_length / viz_width, we want bin_width <= min_seg_len / node_width
         // So viz_width >= total_length * node_width / min_seg_len
-        let min_width = ((len_to_visualize as u64 * args.node_width as u64) / min_seg_len as u64) as u32;
+        let min_width = ((len_to_visualize * args.node_width as u64) / min_seg_len as u64) as u32;
 
-        debug!("show_all_nodes: min_seg={}bp, need {}px width for {}px/node",
-            min_seg_len, min_width, args.node_width);
+        debug!(
+            "show_all_nodes: min_seg={}bp, need {}px width for {}px/node",
+            min_seg_len, min_width, args.node_width
+        );
         min_width.max(args.width)
     } else {
         args.width.min(len_to_visualize as u32)
     };
 
-    let bin_width = args.bin_width.unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
+    let bin_width = args
+        .bin_width
+        .unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
 
     // Cluster paths by similarity if requested (SVG rendering)
     let cluster_result = if args.cluster_paths {
-        debug!("Clustering {} paths by EDR (estimated difference rate)", display_paths.len());
+        debug!(
+            "Clustering {} paths by EDR (estimated difference rate)",
+            display_paths.len()
+        );
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
         let original_paths = display_paths.clone(); // Save for medoids TSV
-        let result = cluster_paths_by_similarity(&display_paths, &segment_lengths, args.cluster_threshold, args.cluster_all_nodes, args.max_clusters, args.dendrogram || args.use_upgma, args.use_upgma, args.upgma_threshold);
+        let result = cluster_paths_by_similarity(
+            &display_paths,
+            &segment_lengths,
+            args.cluster_threshold,
+            args.cluster_all_nodes,
+            args.max_clusters,
+            args.dendrogram || args.use_upgma,
+            args.use_upgma,
+            args.upgma_threshold,
+        );
         display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
         // Write cluster assignments to TSV
         write_cluster_tsv(&args.out, &display_paths, &result);
@@ -3333,7 +4036,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let paths_vec: Vec<GfaPath> = display_paths.iter().map(|&p| p.clone()).collect();
         match load_prefix_merges(p, &paths_vec) {
             Ok(grouping) => {
-                info!("Read {} valid prefixes for {} groups", grouping.prefixes.len(), grouping.num_groups);
+                info!(
+                    "Read {} valid prefixes for {} groups",
+                    grouping.prefixes.len(),
+                    grouping.num_groups
+                );
                 Some(grouping)
             }
             Err(e) => {
@@ -3359,15 +4066,26 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         pg.prefixes.iter().map(|p| p.len()).max().unwrap_or(10)
     } else if args.cluster_representatives {
         // Account for " (n=X)" suffix: max cluster size determines suffix length
-        let max_size = cluster_result.as_ref().map(|cr| cr.cluster_sizes.iter().max().copied().unwrap_or(1)).unwrap_or(1);
+        let max_size = cluster_result
+            .as_ref()
+            .map(|cr| cr.cluster_sizes.iter().max().copied().unwrap_or(1))
+            .unwrap_or(1);
         let suffix_len = format!(" (n={})", max_size).len();
-        display_paths.iter().map(|p| p.name.len() + suffix_len).max().unwrap_or(10)
+        display_paths
+            .iter()
+            .map(|p| p.name.len() + suffix_len)
+            .max()
+            .unwrap_or(10)
     } else {
-        display_paths.iter().map(|p| p.name.len()).max().unwrap_or(10)
+        display_paths
+            .iter()
+            .map(|p| p.name.len())
+            .max()
+            .unwrap_or(10)
     };
     let font_size = (pix_per_path as f64 * 0.8).max(8.0);
     let char_width = font_size * 0.6; // Approximate monospace character width
-    // Disable path names when pack_paths is enabled (they wouldn't make sense)
+                                      // Disable path names when pack_paths is enabled (they wouldn't make sense)
     let text_width = if args.hide_path_names || args.pack_paths {
         0.0
     } else {
@@ -3378,7 +4096,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let cluster_bar_width = if cluster_result.is_some() { 10.0 } else { 0.0 };
 
     // Dendrogram width (only if dendrogram is enabled and we have a dendrogram)
-    let dendrogram_width: f64 = if args.dendrogram && cluster_result.as_ref().map(|cr| cr.dendrogram.is_some()).unwrap_or(false) {
+    let dendrogram_width: f64 = if args.dendrogram
+        && cluster_result
+            .as_ref()
+            .map(|cr| cr.dendrogram.is_some())
+            .unwrap_or(false)
+    {
         args.dendrogram_width as f64
     } else {
         0.0
@@ -3422,16 +4145,23 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
     // Calculate max path length for longest-path option
     let max_path_length: u64 = if args.longest_path || args.change_darkness {
-        display_paths.iter().map(|path| {
-            path.steps.iter().map(|step| {
-                let seg_id = step.segment_id as usize;
-                if seg_id < graph.segments.len() {
-                    graph.segments[seg_id].sequence_len
-                } else {
-                    0
-                }
-            }).sum::<u64>()
-        }).max().unwrap_or(1)
+        display_paths
+            .iter()
+            .map(|path| {
+                path.steps
+                    .iter()
+                    .map(|step| {
+                        let seg_id = step.segment_id as usize;
+                        if seg_id < graph.segments.len() {
+                            graph.segments[seg_id].sequence_len
+                        } else {
+                            0
+                        }
+                    })
+                    .sum::<u64>()
+            })
+            .max()
+            .unwrap_or(1)
     } else {
         1
     };
@@ -3449,11 +4179,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     if orig_idx < n_leaves && display_pos < cr.cluster_ids.len() {
                         // cluster_ids is indexed by display position, not original index
                         let cluster_id = cr.cluster_ids[display_pos];
-                        if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+                        if prev_cluster_id.is_some_and(|prev| prev != cluster_id) {
                             cumulative_gap += args.cluster_gap as f64;
                         }
                         prev_cluster_id = Some(cluster_id);
-                        positions[orig_idx] = display_pos as f64 * pix_per_path as f64 + cumulative_gap;
+                        positions[orig_idx] =
+                            display_pos as f64 * pix_per_path as f64 + cumulative_gap;
                     }
                 }
                 positions
@@ -3485,7 +4216,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     if dendrogram_width > 0.0 && !dendrogram_leaf_y_positions_svg.is_empty() {
         if let Some(ref cr) = cluster_result {
             if let Some(ref dg) = cr.dendrogram {
-                let dendro_svg = render_dendrogram_svg(dg, dendrogram_width, pix_per_path as f64, &dendrogram_leaf_y_positions_svg);
+                let dendro_svg = render_dendrogram_svg(
+                    dg,
+                    dendrogram_width,
+                    pix_per_path as f64,
+                    &dendrogram_leaf_y_positions_svg,
+                );
                 svg.push_str(&dendro_svg);
                 svg.push('\n');
             }
@@ -3521,7 +4257,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
         // Normalize to mean depth
         let num_paths = display_paths.len() as f64;
-        let compressed_bins: FxHashMap<usize, f64> = aggregated_bins.iter()
+        let compressed_bins: FxHashMap<usize, f64> = aggregated_bins
+            .iter()
             .map(|(k, v)| (*k, v / bin_width / num_paths))
             .collect();
 
@@ -3531,7 +4268,9 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let text_y = y_start + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="black">{}</text>"#,
-                dendrogram_width + cluster_bar_width + 5.0, text_y, "COMPRESSED_MODE"
+                dendrogram_width + cluster_bar_width + 5.0,
+                text_y,
+                "COMPRESSED_MODE"
             ));
             svg.push('\n');
         }
@@ -3545,7 +4284,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let mut run_color: (u8, u8, u8) = (0, 0, 0);
 
         for (bin_idx, mean_depth) in &sorted_bins {
-            let (r, g, b) = get_depth_color(*mean_depth, args.no_grey_depth, Some(compressed_palette));
+            let (r, g, b) =
+                get_depth_color(*mean_depth, args.no_grey_depth, Some(compressed_palette));
 
             if let Some(px) = prev_x {
                 if *bin_idx == px + 1 && (r, g, b) == run_color {
@@ -3606,8 +4346,14 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     let offset = graph.segment_offsets[seg_id];
                     let seg_len = graph.segments[seg_id].sequence_len;
                     let n_count = graph.segments[seg_id].n_count;
-                    let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
-                    let is_highlighted = highlight_nodes.as_ref().map_or(false, |hn| hn.contains(&step.segment_id));
+                    let n_proportion = if seg_len > 0 {
+                        n_count as f64 / seg_len as f64
+                    } else {
+                        0.0
+                    };
+                    let is_highlighted = highlight_nodes
+                        .as_ref()
+                        .is_some_and(|hn| hn.contains(&step.segment_id));
 
                     for k in 0..seg_len {
                         let pos = offset + k;
@@ -3617,10 +4363,14 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
                         let entry = bins.entry(curr_bin).or_default();
                         entry.mean_depth += 1.0;
-                        if step.is_reverse { entry.mean_inv += 1.0; }
+                        if step.is_reverse {
+                            entry.mean_inv += 1.0;
+                        }
                         entry.mean_pos += path_pos as f64;
                         entry.mean_uncalled += n_proportion;
-                        if is_highlighted { entry.highlighted = true; }
+                        if is_highlighted {
+                            entry.highlighted = true;
+                        }
                         path_pos += 1;
                     }
                 }
@@ -3632,7 +4382,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     v.mean_pos /= v.mean_depth;
                     v.mean_uncalled /= v.mean_depth;
                 }
-                v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
+                v.mean_inv /= if v.mean_depth > 0.0 {
+                    v.mean_depth
+                } else {
+                    1.0
+                };
                 v.mean_depth /= bin_width;
             }
 
@@ -3642,7 +4396,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 compute_path_color(&path.name, args.color_by_prefix)
             };
 
-            path_data.push(PathBinDataSvg { min_bin, max_bin, bins, color });
+            path_data.push(PathBinDataSvg {
+                min_bin,
+                max_bin,
+                bins,
+                color,
+            });
         }
 
         // Layout buffer: for each X position, track the lowest available row
@@ -3690,14 +4449,27 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         for (path_idx, (pd, path)) in path_data.iter().zip(display_paths.iter()).enumerate() {
             let y_start = path_rows[path_idx] as f64 * pix_per_path as f64;
             let (path_r, path_g, path_b) = pd.color;
-            let path_length: u64 = path.steps.iter().map(|step| {
-                let seg_id = step.segment_id as usize;
-                if seg_id < graph.segments.len() { graph.segments[seg_id].sequence_len } else { 0 }
-            }).sum();
-            let darkness_length = if args.longest_path { max_path_length } else { path_length };
+            let path_length: u64 = path
+                .steps
+                .iter()
+                .map(|step| {
+                    let seg_id = step.segment_id as usize;
+                    if seg_id < graph.segments.len() {
+                        graph.segments[seg_id].sequence_len
+                    } else {
+                        0
+                    }
+                })
+                .sum();
+            let darkness_length = if args.longest_path {
+                max_path_length
+            } else {
+                path_length
+            };
 
             // Group bins by color for rect merging
-            let mut sorted_bins: Vec<(usize, &BinInfo)> = pd.bins.iter().map(|(k, v)| (*k, v)).collect();
+            let mut sorted_bins: Vec<(usize, &BinInfo)> =
+                pd.bins.iter().map(|(k, v)| (*k, v)).collect();
             sorted_bins.sort_by_key(|(k, _)| *k);
 
             let mut prev_x: Option<usize> = None;
@@ -3707,7 +4479,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             for (bin_idx, bin_info) in &sorted_bins {
                 // Calculate color
                 let (r, g, b) = if highlight_nodes.is_some() {
-                    if bin_info.highlighted { (255, 0, 0) } else { (180, 180, 180) }
+                    if bin_info.highlighted {
+                        (255, 0, 0)
+                    } else {
+                        (180, 180, 180)
+                    }
                 } else if args.color_by_mean_depth {
                     get_depth_color(bin_info.mean_depth, args.no_grey_depth, depth_palette)
                 } else if args.color_by_mean_inversion_rate {
@@ -3717,33 +4493,60 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
                     (0, green, 0)
                 } else if args.show_strand {
-                    let apply_strand = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                    let apply_strand = args
+                        .alignment_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| path.name.starts_with(prefix));
                     if apply_strand {
-                        if bin_info.mean_inv > 0.5 { (200, 50, 50) } else { (50, 50, 200) }
-                    } else { (path_r, path_g, path_b) }
-                } else { (path_r, path_g, path_b) };
+                        if bin_info.mean_inv > 0.5 {
+                            (200, 50, 50)
+                        } else {
+                            (50, 50, 200)
+                        }
+                    } else {
+                        (path_r, path_g, path_b)
+                    }
+                } else {
+                    (path_r, path_g, path_b)
+                };
 
-                let (r, g, b) = if args.change_darkness && !highlight_nodes.is_some() {
-                    let apply_darkness = args.alignment_prefix.as_ref().map_or(true, |prefix| path.name.starts_with(prefix));
+                let (r, g, b) = if args.change_darkness && highlight_nodes.is_none() {
+                    let apply_darkness = args
+                        .alignment_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| path.name.starts_with(prefix));
                     if apply_darkness && darkness_length > 0 {
                         let pos_factor = bin_info.mean_pos / darkness_length as f64;
-                        let darkness = if bin_info.mean_inv > 0.5 { 1.0 - pos_factor } else { pos_factor };
+                        let darkness = if bin_info.mean_inv > 0.5 {
+                            1.0 - pos_factor
+                        } else {
+                            pos_factor
+                        };
                         if args.white_to_black {
                             let gray = (255.0 * (1.0 - darkness)).round() as u8;
                             (gray, gray, gray)
                         } else {
                             let factor = 1.0 - (darkness * 0.8);
-                            ((r as f64 * factor).round() as u8, (g as f64 * factor).round() as u8, (b as f64 * factor).round() as u8)
+                            (
+                                (r as f64 * factor).round() as u8,
+                                (g as f64 * factor).round() as u8,
+                                (b as f64 * factor).round() as u8,
+                            )
                         }
-                    } else { (r, g, b) }
-                } else { (r, g, b) };
+                    } else {
+                        (r, g, b)
+                    }
+                } else {
+                    (r, g, b)
+                };
 
                 if let Some(px) = prev_x {
                     if *bin_idx == px + 1 && (r, g, b) == run_color {
                         // Continue run
                     } else {
                         // Output run
-                        let x = dendrogram_width + text_width + cluster_bar_width + run_start as f64;
+                        let x =
+                            dendrogram_width + text_width + cluster_bar_width + run_start as f64;
                         let width = (px - run_start + 1) as f64;
                         svg.push_str(&format!(
                             r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -3793,7 +4596,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             if first {
                 rendered_groups.insert(group_idx);
             }
-            (group_idx as u32, pg.prefixes[group_idx as usize].clone(), first)
+            (
+                group_idx as u32,
+                pg.prefixes[group_idx as usize].clone(),
+                first,
+            )
         } else {
             (path_idx as u32, path.name.clone(), true)
         };
@@ -3814,7 +4621,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         // Add gap before new cluster (except first)
         if let Some(ref cr) = cluster_result {
             let cluster_id = cr.cluster_ids[path_idx];
-            if prev_cluster_id.map_or(false, |prev| prev != cluster_id) {
+            if prev_cluster_id.is_some_and(|prev| prev != cluster_id) {
                 cumulative_gap += cluster_gap;
             }
             prev_cluster_id = Some(cluster_id);
@@ -3836,8 +4643,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
 
         let (path_r, path_g, path_b) = if let Some(ref colors) = custom_colors {
-            colors.get(&path.name).copied()
-                .unwrap_or((200, 200, 200)) // Light grey for non-specified paths
+            colors.get(&path.name).copied().unwrap_or((200, 200, 200)) // Light grey for non-specified paths
         } else {
             compute_path_color(&path.name, args.color_by_prefix)
         };
@@ -3849,7 +4655,13 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 // White text on colored background
                 svg.push_str(&format!(
                     r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                    dendrogram_width + cluster_bar_width, y_start, text_width, pix_per_path, path_r, path_g, path_b
+                    dendrogram_width + cluster_bar_width,
+                    y_start,
+                    text_width,
+                    pix_per_path,
+                    path_r,
+                    path_g,
+                    path_b
                 ));
                 svg.push('\n');
                 "white"
@@ -3858,7 +4670,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             };
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="{}">{}</text>"#,
-                dendrogram_width + cluster_bar_width + 5.0, text_y, text_color, escape_xml(&display_name)
+                dendrogram_width + cluster_bar_width + 5.0,
+                text_y,
+                text_color,
+                escape_xml(&display_name)
             ));
             svg.push('\n');
         }
@@ -3867,15 +4682,23 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let mut bins: FxHashMap<usize, BinInfo> = FxHashMap::default();
 
         // Calculate current path length for darkness gradient
-        let path_length: u64 = path.steps.iter().map(|step| {
-            let seg_id = step.segment_id as usize;
-            if seg_id < graph.segments.len() {
-                graph.segments[seg_id].sequence_len
-            } else {
-                0
-            }
-        }).sum();
-        let darkness_length = if args.longest_path { max_path_length } else { path_length };
+        let path_length: u64 = path
+            .steps
+            .iter()
+            .map(|step| {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    graph.segments[seg_id].sequence_len
+                } else {
+                    0
+                }
+            })
+            .sum();
+        let darkness_length = if args.longest_path {
+            max_path_length
+        } else {
+            path_length
+        };
 
         let mut path_pos: u64 = 0; // Track position within path
         for step in &path.steps {
@@ -3885,12 +4708,16 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 let seg_len = graph.segments[seg_id].sequence_len;
                 let n_count = graph.segments[seg_id].n_count;
                 // Proportion of N's in this segment (for uncalled base coloring)
-                let n_proportion = if seg_len > 0 { n_count as f64 / seg_len as f64 } else { 0.0 };
+                let n_proportion = if seg_len > 0 {
+                    n_count as f64 / seg_len as f64
+                } else {
+                    0.0
+                };
 
                 // Check if this segment is highlighted
                 let is_highlighted = highlight_nodes
                     .as_ref()
-                    .map_or(false, |hn| hn.contains(&step.segment_id));
+                    .is_some_and(|hn| hn.contains(&step.segment_id));
 
                 for k in 0..seg_len {
                     let pos = offset + k;
@@ -3916,7 +4743,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 v.mean_pos /= v.mean_depth;
                 v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
             }
-            v.mean_inv /= if v.mean_depth > 0.0 { v.mean_depth } else { 1.0 };
+            v.mean_inv /= if v.mean_depth > 0.0 {
+                v.mean_depth
+            } else {
+                1.0
+            };
             v.mean_depth /= bin_width;
         }
 
@@ -3951,9 +4782,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 (0, green, 0)
             } else if args.show_strand {
                 // Check if alignment_prefix applies
-                let apply_strand = args.alignment_prefix
+                let apply_strand = args
+                    .alignment_prefix
                     .as_ref()
-                    .map_or(true, |prefix| path.name.starts_with(prefix));
+                    .is_none_or(|prefix| path.name.starts_with(prefix));
 
                 if apply_strand {
                     if bin_info.mean_inv > 0.5 {
@@ -3969,10 +4801,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             };
 
             // Apply darkness gradient if enabled
-            if args.change_darkness && !highlight_nodes.is_some() {
-                let apply_darkness = args.alignment_prefix
+            if args.change_darkness && highlight_nodes.is_none() {
+                let apply_darkness = args
+                    .alignment_prefix
                     .as_ref()
-                    .map_or(true, |prefix| path.name.starts_with(prefix));
+                    .is_none_or(|prefix| path.name.starts_with(prefix));
 
                 if apply_darkness && darkness_length > 0 {
                     let pos_factor = bin_info.mean_pos / darkness_length as f64;
@@ -3987,9 +4820,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                         (gray, gray, gray)
                     } else {
                         let factor = 1.0 - (darkness * 0.8);
-                        ((r as f64 * factor).round() as u8,
-                         (g as f64 * factor).round() as u8,
-                         (b as f64 * factor).round() as u8)
+                        (
+                            (r as f64 * factor).round() as u8,
+                            (g as f64 * factor).round() as u8,
+                            (b as f64 * factor).round() as u8,
+                        )
                     }
                 } else {
                     (r, g, b)
@@ -4013,7 +4848,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     run_end = bin_idx;
                 } else {
                     // Output the previous run
-                    let x = dendrogram_width + cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
+                    let x = dendrogram_width
+                        + cluster_bar_width
+                        + text_width
+                        + (run_start as f64).min((viz_width - 1) as f64);
                     let width = (run_end - run_start + 1) as f64;
                     svg.push_str(&format!(
                         r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -4029,7 +4867,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
 
             // Output the final run
-            let x = dendrogram_width + cluster_bar_width + text_width + (run_start as f64).min((viz_width - 1) as f64);
+            let x = dendrogram_width
+                + cluster_bar_width
+                + text_width
+                + (run_start as f64).min((viz_width - 1) as f64);
             let width = (run_end - run_start + 1) as f64;
             svg.push_str(&format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -4041,10 +4882,18 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         // Add border line if needed
         if !args.no_path_borders && pix_per_path >= 3 {
             let border_y = y_start + rect_height;
-            let border_color = if args.black_path_borders { "black" } else { "white" };
+            let border_color = if args.black_path_borders {
+                "black"
+            } else {
+                "white"
+            };
             svg.push_str(&format!(
                 r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>"#,
-                dendrogram_width + cluster_bar_width + text_width, border_y, total_width, border_y, border_color
+                dendrogram_width + cluster_bar_width + text_width,
+                border_y,
+                total_width,
+                border_y,
+                border_color
             ));
             svg.push('\n');
         }
@@ -4064,8 +4913,14 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
                     // If there's a gap between bins, draw a connecting line
                     if curr_bin > prev_bin + 1 {
-                        let x_start = dendrogram_width + cluster_bar_width + text_width + (prev_bin as f64 + 1.0).min((viz_width - 1) as f64);
-                        let x_end = dendrogram_width + cluster_bar_width + text_width + (curr_bin as f64).min((viz_width - 1) as f64);
+                        let x_start = dendrogram_width
+                            + cluster_bar_width
+                            + text_width
+                            + (prev_bin as f64 + 1.0).min((viz_width - 1) as f64);
+                        let x_end = dendrogram_width
+                            + cluster_bar_width
+                            + text_width
+                            + (curr_bin as f64).min((viz_width - 1) as f64);
                         let line_width = x_end - x_start;
 
                         if line_width > 0.0 {
@@ -4157,7 +5012,9 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             // Find the path with the specified name
             if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
                 // Calculate path length from its steps
-                let path_len: u64 = path.steps.iter()
+                let path_len: u64 = path
+                    .steps
+                    .iter()
                     .map(|step| {
                         let seg_id = step.segment_id as usize;
                         if seg_id < graph.segments.len() {
@@ -4176,7 +5033,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 (offset, offset + path_len)
             } else {
                 // Path not found, fall back to pangenomic
-                debug!("Path '{}' not found, using pangenomic coordinates", coord_system);
+                debug!(
+                    "Path '{}' not found, using pangenomic coordinates",
+                    coord_system
+                );
                 (0u64, len_to_visualize)
             }
         };
@@ -4190,7 +5050,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             // Draw tick mark
             svg.push_str(&format!(
                 r#"<line x1="{:.1}" y1="{}" x2="{:.1}" y2="{}" stroke="black" stroke-width="1"/>"#,
-                x_pos, axis_y, x_pos, axis_y + tick_height
+                x_pos,
+                axis_y,
+                x_pos,
+                axis_y + tick_height
             ));
             svg.push('\n');
 
@@ -4245,8 +5108,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 to_offset as f64 / bin_width
             };
 
-            let (a, b) = if a_pos < b_pos { (a_pos, b_pos) } else { (b_pos, a_pos) };
-            let dist = ((b - a) * bin_width) as f64;
+            let (a, b) = if a_pos < b_pos {
+                (a_pos, b_pos)
+            } else {
+                (b_pos, a_pos)
+            };
+            let dist = (b - a) * bin_width;
             let h = (dist * scale_y_edges).min(edge_height as f64 - 1.0);
 
             let ax = dendrogram_width + cluster_bar_width + text_width + a.round();
@@ -4277,8 +5144,14 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Update viewBox height to crop to actual content
     let final_height = max_y + bottom_padding as f64;
     svg = svg.replace(
-        &format!(r#"height="{}" viewBox="0 0 {} {}"#, total_height, total_width, total_height),
-        &format!(r#"height="{}" viewBox="0 0 {} {}"#, final_height, total_width, final_height),
+        &format!(
+            r#"height="{}" viewBox="0 0 {} {}"#,
+            total_height, total_width, total_height
+        ),
+        &format!(
+            r#"height="{}" viewBox="0 0 {} {}"#,
+            final_height, total_width, final_height
+        ),
     );
 
     svg
@@ -4311,8 +5184,10 @@ fn main() {
     }
 
     // Detect output format by file extension
-    let is_svg = args.out.extension()
-        .map(|ext| ext.to_ascii_lowercase() == "svg")
+    let is_svg = args
+        .out
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("svg"))
         .unwrap_or(false);
 
     if is_svg {
