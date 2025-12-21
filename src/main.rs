@@ -1214,15 +1214,33 @@ fn parse_csv_fields(line: &str) -> Vec<String> {
     fields
 }
 
+/// Fixed grey color for NA (unmatched) paths
+const NA_COLOR: (u8, u8, u8) = (180, 180, 180);
+
 impl AnnotationData {
     /// Find annotation for a path by matching against prefixes (longest match wins)
-    fn get_annotation(&self, path_name: &str) -> Option<&String> {
+    /// Returns "NA" for paths that don't match any prefix
+    fn get_annotation(&self, path_name: &str) -> &str {
         for prefix in &self.prefixes {
             if path_name.starts_with(prefix) {
-                return self.prefix_to_annotation.get(prefix);
+                if let Some(ann) = self.prefix_to_annotation.get(prefix) {
+                    return ann.as_str();
+                }
             }
         }
-        None
+        "NA"
+    }
+
+    /// Get color for a category (grey for NA, palette color for others)
+    fn get_color(&self, category: &str) -> (u8, u8, u8) {
+        if category == "NA" {
+            NA_COLOR
+        } else {
+            self.category_colors
+                .get(category)
+                .copied()
+                .unwrap_or(NA_COLOR)
+        }
     }
 }
 
@@ -1283,9 +1301,14 @@ fn load_annotations(path: &PathBuf) -> std::io::Result<AnnotationData> {
     let mut prefixes: Vec<String> = prefix_to_annotation.keys().cloned().collect();
     prefixes.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
-    // Sort categories alphabetically for consistent ordering
+    // Sort categories alphabetically for consistent ordering, but put "NA" last
     let mut categories: Vec<String> = categories_set.into_iter().collect();
-    categories.sort();
+    categories.sort_by(|a, b| match (a.as_str(), b.as_str()) {
+        ("NA", "NA") => std::cmp::Ordering::Equal,
+        ("NA", _) => std::cmp::Ordering::Greater,
+        (_, "NA") => std::cmp::Ordering::Less,
+        _ => a.cmp(b),
+    });
 
     // Assign colors to categories
     let total = categories.len();
@@ -2560,45 +2583,49 @@ fn render_annotation_legend_png(
     let swatch_y = y_center.saturating_sub(swatch_size / 2);
 
     for category in categories.iter().take(visible_count) {
-        if let Some(&(r, g, b)) = category_colors.get(category) {
-            // Draw color swatch
-            for sx in 0..swatch_size {
-                for sy in 0..swatch_size {
-                    let px = x_pos + sx;
-                    let py = swatch_y + sy;
-                    if px < width {
-                        let idx = ((py * width + px) * 4) as usize;
-                        if idx + 3 < buffer.len() {
-                            buffer[idx] = r;
-                            buffer[idx + 1] = g;
-                            buffer[idx + 2] = b;
-                            buffer[idx + 3] = 255;
-                        }
+        // Use grey for NA, otherwise look up in category_colors
+        let (r, g, b) = if category == "NA" {
+            NA_COLOR
+        } else {
+            category_colors.get(category).copied().unwrap_or(NA_COLOR)
+        };
+
+        // Draw color swatch
+        for sx in 0..swatch_size {
+            for sy in 0..swatch_size {
+                let px = x_pos + sx;
+                let py = swatch_y + sy;
+                if px < width {
+                    let idx = ((py * width + px) * 4) as usize;
+                    if idx + 3 < buffer.len() {
+                        buffer[idx] = r;
+                        buffer[idx + 1] = g;
+                        buffer[idx + 2] = b;
+                        buffer[idx + 3] = 255;
                     }
                 }
             }
-
-            // Draw category label
-            let text_x = x_pos + swatch_size + text_padding;
-            let text_y = y_center.saturating_sub(char_size / 2);
-            for (i, c) in category.chars().enumerate() {
-                let char_x = text_x + (i as u32) * char_size;
-                if char_x + char_size > width {
-                    break;
-                }
-                let c_byte = c as usize;
-                let char_data = if c_byte < 128 {
-                    &FONT_5X8[c_byte]
-                } else {
-                    &FONT_5X8[b'?' as usize]
-                };
-                write_char(buffer, width, char_x, text_y, char_data, char_size, 0, 0, 0);
-            }
-
-            // Move to next item
-            x_pos +=
-                swatch_size + text_padding + (category.len() as u32 * char_size) + item_spacing;
         }
+
+        // Draw category label
+        let text_x = x_pos + swatch_size + text_padding;
+        let text_y = y_center.saturating_sub(char_size / 2);
+        for (i, c) in category.chars().enumerate() {
+            let char_x = text_x + (i as u32) * char_size;
+            if char_x + char_size > width {
+                break;
+            }
+            let c_byte = c as usize;
+            let char_data = if c_byte < 128 {
+                &FONT_5X8[c_byte]
+            } else {
+                &FONT_5X8[b'?' as usize]
+            };
+            write_char(buffer, width, char_x, text_y, char_data, char_size, 0, 0, 0);
+        }
+
+        // Move to next item
+        x_pos += swatch_size + text_padding + (category.len() as u32 * char_size) + item_spacing;
     }
 
     // Draw "+N" indicator if there are hidden categories
@@ -2649,7 +2676,6 @@ fn render_annotation_legend_svg(
     // Calculate total legend width for centering
     let total_legend_width: f64 = categories
         .iter()
-        .filter_map(|cat| category_colors.get(cat).map(|_| cat))
         .map(|cat| {
             let text_width = cat.len() as f64 * font_size * 0.6;
             swatch_size + text_padding + text_width + item_spacing
@@ -2664,27 +2690,32 @@ fn render_annotation_legend_svg(
     let swatch_y = y_center - swatch_size / 2.0;
 
     for category in categories {
-        if let Some(&(r, g, b)) = category_colors.get(category) {
-            // Draw color swatch
-            svg.push_str(&format!(
-                r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                x_pos, swatch_y, swatch_size, swatch_size, r, g, b
-            ));
-            svg.push('\n');
+        // Use grey for NA, otherwise look up in category_colors
+        let (r, g, b) = if category == "NA" {
+            NA_COLOR
+        } else {
+            category_colors.get(category).copied().unwrap_or(NA_COLOR)
+        };
 
-            // Draw category label
-            let text_x = x_pos + swatch_size + text_padding;
-            let text_y = y_center + font_size / 3.0;
-            svg.push_str(&format!(
-                r#"<text x="{}" y="{}" font-family="'DejaVu Sans Mono', 'Courier New', monospace" font-size="{}" fill="black">{}</text>"#,
-                text_x, text_y, font_size, escape_xml(category)
-            ));
-            svg.push('\n');
+        // Draw color swatch
+        svg.push_str(&format!(
+            r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+            x_pos, swatch_y, swatch_size, swatch_size, r, g, b
+        ));
+        svg.push('\n');
 
-            // Estimate text width (approximate: 0.6 * font_size per character)
-            let text_width = category.len() as f64 * font_size * 0.6;
-            x_pos += swatch_size + text_padding + text_width + item_spacing;
-        }
+        // Draw category label
+        let text_x = x_pos + swatch_size + text_padding;
+        let text_y = y_center + font_size / 3.0;
+        svg.push_str(&format!(
+            r#"<text x="{}" y="{}" font-family="'DejaVu Sans Mono', 'Courier New', monospace" font-size="{}" fill="black">{}</text>"#,
+            text_x, text_y, font_size, escape_xml(category)
+        ));
+        svg.push('\n');
+
+        // Estimate text width (approximate: 0.6 * font_size per character)
+        let text_width = category.len() as f64 * font_size * 0.6;
+        x_pos += swatch_size + text_padding + text_width + item_spacing;
     }
 
     svg
@@ -3132,16 +3163,23 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     };
 
     // Filter annotation categories to only those used by paths in the graph (for legend)
+    // NA is added at the end if any path doesn't match a prefix
     let filtered_categories: Vec<String> = if let Some(ref ann) = annotations {
-        let used_categories: std::collections::HashSet<&String> = display_paths
+        let used_categories: std::collections::HashSet<&str> = display_paths
             .iter()
-            .filter_map(|p| ann.get_annotation(&p.name))
+            .map(|p| ann.get_annotation(&p.name))
             .collect();
-        ann.categories
+        let mut cats: Vec<String> = ann
+            .categories
             .iter()
-            .filter(|c| used_categories.contains(c))
+            .filter(|c| used_categories.contains(c.as_str()))
             .cloned()
-            .collect()
+            .collect();
+        // Add NA at the end if any path has it
+        if used_categories.contains("NA") && !cats.iter().any(|c| c == "NA") {
+            cats.push("NA".to_string());
+        }
+        cats
     } else {
         Vec::new()
     };
@@ -3650,24 +3688,22 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
             // Render annotation indicator bar (after cluster bar + gap)
             if let Some(ref ann) = annotations {
-                if let Some(category) = ann.get_annotation(&path.name) {
-                    if let Some(&(ar, ag, ab)) = ann.category_colors.get(category) {
-                        let ann_bar_x_start = dendrogram_width + cluster_bar_width + bar_gap;
-                        for x in ann_bar_x_start..(ann_bar_x_start + annotation_bar_width) {
-                            add_path_step(
-                                &mut path_names_buffer,
-                                path_names_width,
-                                x,
-                                y_start,
-                                pix_per_path,
-                                ar,
-                                ag,
-                                ab,
-                                true,
-                                false,
-                            );
-                        }
-                    }
+                let category = ann.get_annotation(&path.name);
+                let (ar, ag, ab) = ann.get_color(category);
+                let ann_bar_x_start = dendrogram_width + cluster_bar_width + bar_gap;
+                for x in ann_bar_x_start..(ann_bar_x_start + annotation_bar_width) {
+                    add_path_step(
+                        &mut path_names_buffer,
+                        path_names_width,
+                        x,
+                        y_start,
+                        pix_per_path,
+                        ar,
+                        ag,
+                        ab,
+                        true,
+                        false,
+                    );
                 }
             }
         }
@@ -4761,16 +4797,21 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Render annotation legend at the top if annotations are loaded (SVG)
     if let Some(ref ann) = annotations {
         // Filter categories to only those used by paths in the graph
-        let used_categories: std::collections::HashSet<&String> = display_paths
+        // NA is added at the end if any path doesn't match a prefix
+        let used_categories: std::collections::HashSet<&str> = display_paths
             .iter()
-            .filter_map(|p| ann.get_annotation(&p.name))
+            .map(|p| ann.get_annotation(&p.name))
             .collect();
-        let filtered_categories: Vec<String> = ann
+        let mut filtered_categories: Vec<String> = ann
             .categories
             .iter()
-            .filter(|c| used_categories.contains(c))
+            .filter(|c| used_categories.contains(c.as_str()))
             .cloned()
             .collect();
+        // Add NA at the end if any path has it
+        if used_categories.contains("NA") && !filtered_categories.iter().any(|c| c == "NA") {
+            filtered_categories.push("NA".to_string());
+        }
 
         let legend_svg = render_annotation_legend_svg(
             &filtered_categories,
@@ -5230,23 +5271,21 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 svg.push('\n');
             }
 
-            // Render annotation indicator bar (after cluster bar)
+            // Render annotation indicator bar (after cluster bar + gap)
             if let Some(ref ann) = annotations {
-                if let Some(category) = ann.get_annotation(&path.name) {
-                    if let Some(&(ar, ag, ab)) = ann.category_colors.get(category) {
-                        svg.push_str(&format!(
-                            r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                            dendrogram_width + cluster_bar_width,
-                            y_start,
-                            annotation_bar_width,
-                            pix_per_path,
-                            ar,
-                            ag,
-                            ab
-                        ));
-                        svg.push('\n');
-                    }
-                }
+                let category = ann.get_annotation(&path.name);
+                let (ar, ag, ab) = ann.get_color(category);
+                svg.push_str(&format!(
+                    r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
+                    dendrogram_width + cluster_bar_width + bar_gap,
+                    y_start,
+                    annotation_bar_width,
+                    pix_per_path,
+                    ar,
+                    ag,
+                    ab
+                ));
+                svg.push('\n');
             }
         }
 
