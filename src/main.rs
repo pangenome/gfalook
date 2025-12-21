@@ -3557,17 +3557,6 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             }
         }
 
-        // Draw horizontal axis line (PNG)
-        for x in path_names_width..total_width {
-            let idx = ((axis_y * total_width + x) * 4) as usize;
-            if idx + 3 < buffer.len() {
-                buffer[idx] = 0;
-                buffer[idx + 1] = 0;
-                buffer[idx + 2] = 0;
-                buffer[idx + 3] = 255;
-            }
-        }
-
         // Calculate tick positions and labels
         let num_ticks = args.x_ticks.max(2) as usize;
         let is_pangenomic = coord_system.to_lowercase() == "pangenomic";
@@ -3579,40 +3568,73 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
         // For pangenomic coordinates, use total graph length
         // For path-based coordinates, find the path and use its length
-        let (coord_start, coord_end) = if is_pangenomic {
-            (0u64, len_to_visualize)
+        // Also calculate pixel range where the path actually appears
+        let (coord_start, coord_end, pixel_start, pixel_end) = if is_pangenomic {
+            (0u64, len_to_visualize, 0u32, viz_width)
         } else if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
-            let path_len: u64 = path
-                .steps
-                .iter()
-                .map(|step| {
-                    let seg_id = step.segment_id as usize;
-                    if seg_id < graph.segments.len() {
-                        graph.segments[seg_id].sequence_len
-                    } else {
-                        0
+            // Calculate path length and pangenomic positions from its steps
+            let mut path_len: u64 = 0;
+            let mut pangenomic_start: Option<u64> = None;
+            let mut pangenomic_end: u64 = 0;
+
+            for step in &path.steps {
+                let seg_id = step.segment_id as usize;
+                if seg_id < graph.segments.len() {
+                    let seg_len = graph.segments[seg_id].sequence_len;
+                    let seg_offset = graph.segment_offsets[seg_id];
+
+                    // Track first segment's pangenomic position
+                    if pangenomic_start.is_none() {
+                        pangenomic_start = Some(seg_offset);
                     }
-                })
-                .sum();
+                    // Track last segment's end position
+                    pangenomic_end = seg_offset + seg_len;
+                    path_len += seg_len;
+                }
+            }
+
+            let pangenomic_start = pangenomic_start.unwrap_or(0);
+
+            // Convert pangenomic positions to pixel positions
+            let pix_start = ((pangenomic_start as f64 / bin_width) as u32).min(viz_width);
+            let pix_end = ((pangenomic_end as f64 / bin_width) as u32).min(viz_width);
+
             // Add subpath start offset if --x-axis-absolute is enabled
             let offset = if args.x_axis_absolute {
                 parse_subpath_start(coord_system)
             } else {
                 0
             };
-            (offset, offset + path_len)
+            (offset, offset + path_len, pix_start, pix_end)
         } else {
             debug!(
                 "Path '{}' not found, using pangenomic coordinates",
                 coord_system
             );
-            (0u64, len_to_visualize)
+            (0u64, len_to_visualize, 0u32, viz_width)
         };
 
-        // Draw ticks and labels
+        // Calculate the pixel width of the path's range
+        let path_pixel_width = pixel_end.saturating_sub(pixel_start);
+
+        // Draw horizontal axis line only where the path exists (PNG)
+        let axis_line_start = path_names_width + pixel_start;
+        let axis_line_end = path_names_width + pixel_end;
+        for x in axis_line_start..axis_line_end {
+            let idx = ((axis_y * total_width + x) * 4) as usize;
+            if idx + 3 < buffer.len() {
+                buffer[idx] = 0;
+                buffer[idx + 1] = 0;
+                buffer[idx + 2] = 0;
+                buffer[idx + 3] = 255;
+            }
+        }
+
+        // Draw ticks and labels only where the path exists
         for i in 0..num_ticks {
             let t = i as f64 / (num_ticks - 1) as f64;
-            let x_pos = path_names_width + (t * (viz_width as f64 - 1.0)) as u32;
+            // Map tick position to the path's pixel range
+            let x_pos = path_names_width + pixel_start + (t * (path_pixel_width as f64 - 1.0).max(0.0)) as u32;
             let coord_value = coord_start as f64 + t * (coord_end - coord_start) as f64;
 
             // Draw tick mark
@@ -4956,9 +4978,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         // Y position for the axis line (at the bottom of paths)
         let axis_y = path_space_with_gap + axis_padding;
 
-        // X start and end of the axis line
+        // X start of the axis line (end will be calculated based on path's pangenomic extent)
         let axis_x_start = dendrogram_width + cluster_bar_width + text_width;
-        let axis_x_end = total_width;
 
         // Draw axis label on the left
         // Strip the :start-end range from the label when showing absolute coordinates
@@ -4988,13 +5009,6 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         ));
         svg.push('\n');
 
-        // Draw horizontal axis line
-        svg.push_str(&format!(
-            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="black" stroke-width="1"/>"#,
-            axis_x_start, axis_y, axis_x_end, axis_y
-        ));
-        svg.push('\n');
-
         // Calculate tick positions and labels
         let num_ticks = args.x_ticks.max(2) as usize;
         let is_pangenomic = coord_system.to_lowercase() == "pangenomic";
@@ -5006,45 +5020,73 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
         // For pangenomic coordinates, use total graph length
         // For path-based coordinates, find the path and use its length
-        let (coord_start, coord_end) = if is_pangenomic {
-            (0u64, len_to_visualize)
+        // Also calculate pixel range where the path actually appears
+        let (coord_start, coord_end, pixel_start, pixel_end) = if is_pangenomic {
+            (0u64, len_to_visualize, 0.0f64, viz_width as f64)
         } else {
             // Find the path with the specified name
             if let Some(path) = graph.paths.iter().find(|p| p.name == *coord_system) {
-                // Calculate path length from its steps
-                let path_len: u64 = path
-                    .steps
-                    .iter()
-                    .map(|step| {
-                        let seg_id = step.segment_id as usize;
-                        if seg_id < graph.segments.len() {
-                            graph.segments[seg_id].sequence_len
-                        } else {
-                            0
+                // Calculate path length and pangenomic positions from its steps
+                let mut path_len: u64 = 0;
+                let mut pangenomic_start: Option<u64> = None;
+                let mut pangenomic_end: u64 = 0;
+
+                for step in &path.steps {
+                    let seg_id = step.segment_id as usize;
+                    if seg_id < graph.segments.len() {
+                        let seg_len = graph.segments[seg_id].sequence_len;
+                        let seg_offset = graph.segment_offsets[seg_id];
+
+                        // Track first segment's pangenomic position
+                        if pangenomic_start.is_none() {
+                            pangenomic_start = Some(seg_offset);
                         }
-                    })
-                    .sum();
+                        // Track last segment's end position
+                        pangenomic_end = seg_offset + seg_len;
+                        path_len += seg_len;
+                    }
+                }
+
+                let pangenomic_start = pangenomic_start.unwrap_or(0);
+
+                // Convert pangenomic positions to pixel positions
+                let pix_start = (pangenomic_start as f64 / bin_width).min(viz_width as f64);
+                let pix_end = (pangenomic_end as f64 / bin_width).min(viz_width as f64);
+
                 // Add subpath start offset if --x-axis-absolute is enabled
                 let offset = if args.x_axis_absolute {
                     parse_subpath_start(coord_system)
                 } else {
                     0
                 };
-                (offset, offset + path_len)
+                (offset, offset + path_len, pix_start, pix_end)
             } else {
                 // Path not found, fall back to pangenomic
                 debug!(
                     "Path '{}' not found, using pangenomic coordinates",
                     coord_system
                 );
-                (0u64, len_to_visualize)
+                (0u64, len_to_visualize, 0.0f64, viz_width as f64)
             }
         };
 
-        // Draw ticks
+        // Calculate the pixel width of the path's range
+        let path_pixel_width = pixel_end - pixel_start;
+
+        // Draw horizontal axis line only where the path exists
+        let axis_line_x_start = axis_x_start as f64 + pixel_start;
+        let axis_line_x_end = axis_x_start as f64 + pixel_end;
+        svg.push_str(&format!(
+            r#"<line x1="{:.1}" y1="{}" x2="{:.1}" y2="{}" stroke="black" stroke-width="1"/>"#,
+            axis_line_x_start, axis_y, axis_line_x_end, axis_y
+        ));
+        svg.push('\n');
+
+        // Draw ticks only where the path exists
         for i in 0..num_ticks {
             let t = i as f64 / (num_ticks - 1) as f64;
-            let x_pos = axis_x_start as f64 + t * (viz_width as f64 - 1.0);
+            // Map tick position to the path's pixel range
+            let x_pos = axis_x_start as f64 + pixel_start + t * (path_pixel_width - 1.0).max(0.0);
             let coord_value = coord_start as f64 + t * (coord_end - coord_start) as f64;
 
             // Draw tick mark
