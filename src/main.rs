@@ -403,15 +403,6 @@ struct Args {
     )]
     annotation_file: Option<PathBuf>,
 
-    /// Column number for annotation values (1-based). Default: 2 for TSV, 4 for CSV.
-    #[arg(
-        long = "annotation-column",
-        value_name = "N",
-        requires = "annotation_file",
-        help_heading = "Annotation"
-    )]
-    annotation_column: Option<usize>,
-
     /// Width of annotation bar in pixels.
     #[arg(
         long = "annotation-bar-width",
@@ -1237,10 +1228,10 @@ impl AnnotationData {
 
 /// Load path annotations from a TSV/CSV file
 /// Expected format: prefix,annotation (first line is header)
+/// The file must have exactly 2 columns: prefix and annotation
 /// The prefix column matches path names that start with that prefix
 /// Supports both TSV (tab-separated) and CSV (comma-separated) based on file extension
-/// annotation_column is 1-based (None = auto: 2 for TSV, 4 for CSV/HPRC format)
-fn load_annotations(path: &PathBuf, annotation_column: Option<usize>) -> std::io::Result<AnnotationData> {
+fn load_annotations(path: &PathBuf) -> std::io::Result<AnnotationData> {
     // Read file as bytes and convert lossy to handle non-UTF8 characters
     let bytes = std::fs::read(path)?;
     let content = String::from_utf8_lossy(&bytes);
@@ -1250,12 +1241,6 @@ fn load_annotations(path: &PathBuf, annotation_column: Option<usize>) -> std::io
         .extension()
         .map(|e| e.to_string_lossy().to_lowercase() == "csv")
         .unwrap_or(false);
-
-    // Determine annotation column (0-based internally)
-    // Default: column 2 (index 1) for TSV, column 4 (index 3) for CSV
-    let ann_col_idx = annotation_column
-        .map(|c| c.saturating_sub(1))
-        .unwrap_or(if is_csv { 3 } else { 1 });
 
     let mut prefix_to_annotation: FxHashMap<String, String> = FxHashMap::default();
     let mut categories_set: FxHashSet<String> = FxHashSet::default();
@@ -1282,10 +1267,10 @@ fn load_annotations(path: &PathBuf, annotation_column: Option<usize>) -> std::io
             line.split('\t').map(|s| s.to_string()).collect()
         };
 
-        // Get prefix (column 0) and annotation (specified column)
-        if fields.len() > ann_col_idx {
+        // Get prefix (column 0) and annotation (column 1)
+        if fields.len() >= 2 {
             let prefix = fields[0].clone();
-            let annotation = fields[ann_col_idx].clone();
+            let annotation = fields[1].clone();
 
             if !annotation.is_empty() && !prefix.is_empty() {
                 categories_set.insert(annotation.clone());
@@ -1296,7 +1281,7 @@ fn load_annotations(path: &PathBuf, annotation_column: Option<usize>) -> std::io
 
     // Sort prefixes by length descending (longest match first)
     let mut prefixes: Vec<String> = prefix_to_annotation.keys().cloned().collect();
-    prefixes.sort_by(|a, b| b.len().cmp(&a.len()));
+    prefixes.sort_by_key(|b| std::cmp::Reverse(b.len()));
 
     // Sort categories alphabetically for consistent ordering
     let mut categories: Vec<String> = categories_set.into_iter().collect();
@@ -2611,7 +2596,8 @@ fn render_annotation_legend_png(
             }
 
             // Move to next item
-            x_pos += swatch_size + text_padding + (category.len() as u32 * char_size) + item_spacing;
+            x_pos +=
+                swatch_size + text_padding + (category.len() as u32 * char_size) + item_spacing;
         }
     }
 
@@ -2629,7 +2615,9 @@ fn render_annotation_legend_png(
                 } else {
                     &FONT_5X8[b'?' as usize]
                 };
-                write_char(buffer, width, char_x, text_y, char_data, char_size, 128, 128, 128);
+                write_char(
+                    buffer, width, char_x, text_y, char_data, char_size, 128, 128, 128,
+                );
             }
         }
     }
@@ -2969,22 +2957,23 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     });
 
     // Load annotations if specified
-    let annotations: Option<AnnotationData> = args.annotation_file.as_ref().and_then(|p| {
-        match load_annotations(p, args.annotation_column) {
-            Ok(ann) => {
-                info!(
-                    "Loaded {} prefixes across {} categories",
-                    ann.prefixes.len(),
-                    ann.categories.len()
-                );
-                Some(ann)
-            }
-            Err(e) => {
-                eprintln!("[gfalook] warning: failed to load annotations: {}", e);
-                None
-            }
-        }
-    });
+    let annotations: Option<AnnotationData> =
+        args.annotation_file
+            .as_ref()
+            .and_then(|p| match load_annotations(p) {
+                Ok(ann) => {
+                    info!(
+                        "Loaded {} prefixes across {} categories",
+                        ann.prefixes.len(),
+                        ann.categories.len()
+                    );
+                    Some(ann)
+                }
+                Err(e) => {
+                    eprintln!("[gfalook] warning: failed to load annotations: {}", e);
+                    None
+                }
+            });
 
     // Effective row count: use num_groups if grouping is enabled, 1 if compressed mode
     let effective_row_count = if args.compressed_mode {
@@ -3037,7 +3026,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     };
 
     // Gap between cluster bar and annotation bar when both are present
-    let bar_gap: u32 = if cluster_result.is_some() && annotations.is_some() { 4 } else { 0 };
+    let bar_gap: u32 = if cluster_result.is_some() && annotations.is_some() {
+        4
+    } else {
+        0
+    };
 
     // Legend height (only if annotations are loaded)
     let legend_height: u32 = if annotations.is_some() {
@@ -3068,7 +3061,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     };
 
     // Total left panel width includes dendrogram + cluster bar + gap + annotation bar + path names
-    let path_names_width = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_only_width;
+    let path_names_width =
+        dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_only_width;
 
     let path_space = effective_row_count * pix_per_path + total_gap;
 
@@ -3691,8 +3685,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             let left_padding = max_num_of_chars - num_of_chars;
 
             if args.color_path_names_background {
-                for x in (left_padding as u32 * char_size + dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width)
-                    ..path_names_width
+                for x in (left_padding as u32 * char_size
+                    + dendrogram_width
+                    + cluster_bar_width
+                    + bar_gap
+                    + annotation_bar_width)..path_names_width
                 {
                     add_path_step(
                         &mut path_names_buffer,
@@ -4554,22 +4551,23 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     });
 
     // Load annotations if specified (SVG)
-    let annotations: Option<AnnotationData> = args.annotation_file.as_ref().and_then(|p| {
-        match load_annotations(p, args.annotation_column) {
-            Ok(ann) => {
-                info!(
-                    "Loaded {} prefixes across {} categories (SVG)",
-                    ann.prefixes.len(),
-                    ann.categories.len()
-                );
-                Some(ann)
-            }
-            Err(e) => {
-                eprintln!("[gfalook] warning: failed to load annotations: {}", e);
-                None
-            }
-        }
-    });
+    let annotations: Option<AnnotationData> =
+        args.annotation_file
+            .as_ref()
+            .and_then(|p| match load_annotations(p) {
+                Ok(ann) => {
+                    info!(
+                        "Loaded {} prefixes across {} categories (SVG)",
+                        ann.prefixes.len(),
+                        ann.categories.len()
+                    );
+                    Some(ann)
+                }
+                Err(e) => {
+                    eprintln!("[gfalook] warning: failed to load annotations: {}", e);
+                    None
+                }
+            });
 
     // Effective row count: use num_groups if grouping is enabled, 1 if compressed mode
     let effective_row_count = if args.compressed_mode {
@@ -4624,7 +4622,11 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     };
 
     // Gap between cluster bar and annotation bar when both are present
-    let bar_gap: f64 = if cluster_result.is_some() && annotations.is_some() { 4.0 } else { 0.0 };
+    let bar_gap: f64 = if cluster_result.is_some() && annotations.is_some() {
+        4.0
+    } else {
+        0.0
+    };
 
     // Legend height (only if annotations are loaded)
     let legend_height: f64 = if annotations.is_some() {
@@ -4651,7 +4653,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let edge_height = (len_to_visualize.min(height_param)) as u32;
     let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
 
-    let total_width = viz_width as f64 + text_width + cluster_bar_width + bar_gap + annotation_bar_width + dendrogram_width;
+    let total_width = viz_width as f64
+        + text_width
+        + cluster_bar_width
+        + bar_gap
+        + annotation_bar_width
+        + dendrogram_width;
     let total_height = legend_height as u32 + path_space + edge_height;
 
     // Load colorbrewer palette if specified (SVG)
@@ -4721,8 +4728,9 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                             cumulative_gap += args.cluster_gap as f64;
                         }
                         prev_cluster_id = Some(cluster_id);
-                        positions[orig_idx] =
-                            legend_height + display_pos as f64 * pix_per_path as f64 + cumulative_gap;
+                        positions[orig_idx] = legend_height
+                            + display_pos as f64 * pix_per_path as f64
+                            + cumulative_gap;
                     }
                 }
                 positions
@@ -4854,7 +4862,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     // Continue the run
                 } else {
                     // Output the previous run
-                    let x = dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
+                    let x = dendrogram_width
+                        + text_width
+                        + cluster_bar_width
+                        + bar_gap
+                        + annotation_bar_width
+                        + run_start as f64;
                     let width = (px - run_start + 1) as f64;
                     svg.push_str(&format!(
                         r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -4874,7 +4887,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
         // Output last run
         if let Some(px) = prev_x {
-            let x = dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
+            let x = dendrogram_width
+                + text_width
+                + cluster_bar_width
+                + bar_gap
+                + annotation_bar_width
+                + run_start as f64;
             let width = (px - run_start + 1) as f64;
             svg.push_str(&format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -5107,8 +5125,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                         // Continue run
                     } else {
                         // Output run
-                        let x =
-                            dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
+                        let x = dendrogram_width
+                            + text_width
+                            + cluster_bar_width
+                            + bar_gap
+                            + annotation_bar_width
+                            + run_start as f64;
                         let width = (px - run_start + 1) as f64;
                         svg.push_str(&format!(
                             r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -5126,7 +5148,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
             // Output last run
             if let Some(px) = prev_x {
-                let x = dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
+                let x = dendrogram_width
+                    + text_width
+                    + cluster_bar_width
+                    + bar_gap
+                    + annotation_bar_width
+                    + run_start as f64;
                 let width = (px - run_start + 1) as f64;
                 svg.push_str(&format!(
                     r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -5213,7 +5240,9 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                             y_start,
                             annotation_bar_width,
                             pix_per_path,
-                            ar, ag, ab
+                            ar,
+                            ag,
+                            ab
                         ));
                         svg.push('\n');
                     }
@@ -5538,7 +5567,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let axis_y = legend_height + path_space_with_gap + axis_padding;
 
         // X start of the axis line (end will be calculated based on path's pangenomic extent)
-        let axis_x_start = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width;
+        let axis_x_start =
+            dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width;
 
         // Draw axis label on the left
         // Strip the :start-end range from the label when showing absolute coordinates
@@ -5717,8 +5747,18 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let dist = (b - a) * bin_width;
             let h = (dist * scale_y_edges).min(edge_height as f64 - 1.0);
 
-            let ax = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width + a.round();
-            let bx = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width + b.round();
+            let ax = dendrogram_width
+                + cluster_bar_width
+                + bar_gap
+                + annotation_bar_width
+                + text_width
+                + a.round();
+            let bx = dendrogram_width
+                + cluster_bar_width
+                + bar_gap
+                + annotation_bar_width
+                + text_width
+                + b.round();
 
             // Skip degenerate edges (zero height and minimal width - not visible)
             if h < 1.0 && (bx - ax).abs() < 2.0 {

@@ -203,24 +203,26 @@ gfalook -i graph.gfa -o xaxis_chm13_abs.png -x 1000 -y 500 \
 
 ### Path annotations (`-E`)
 
-Label paths by category (e.g., population, sample type) using an annotation file. The annotation file is a TSV with two columns: `prefix` and `annotation`. Each prefix is matched against path names (longest match wins), and categories are displayed as a centered legend at the top with colored indicators next to each path.
+Label paths by category (e.g., population, sample type) using an annotation file. The annotation file is a CSV or TSV with two columns: `prefix` and `annotation`. Each prefix is matched against path names (longest match wins), and categories are displayed as a centered legend at the top with colored indicators next to each path.
 
 ```bash
 gfalook -i graph.gfa -o annotation.png -x 1000 -y 500 \
-    -E test/annotations.tsv
+    -E test/hprc_year1_samples.csv
 ```
 
 ![Path annotations](images/annotation.png)
 
-Example annotation file (`test/annotations.tsv`):
+Example annotation file (`test/hprc_year1_samples.csv`) - includes all 234 HPRC Year 1 samples with their population codes:
 ```
-prefix	annotation
-chm13	Reference
-grch38	Reference
-HG00438	CHS
-HG00621	CHS
-HG01891	ACB
+prefix,annotation
+HG00438,CHS
+HG00621,CHS
+HG01891,ACB
 ...
+CHM13,REF
+GRCh38,REF
+HG002,NA
+HG005,NA
 ```
 
 ### Annotations with clustering (`-E -k -D -m --x-axis`)
@@ -229,7 +231,7 @@ Combine path annotations with clustering, dendrogram, depth coloring, and x-axis
 
 ```bash
 gfalook -i graph.gfa -o annotation_clustered.png -x 1000 -y 500 \
-    -E test/annotations.tsv -k -D -m \
+    -E test/hprc_year1_samples.csv -k -D -m \
     --x-axis "chm13#chr6:31825251-31908851" --x-axis-absolute
 ```
 
