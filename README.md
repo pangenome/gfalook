@@ -17,7 +17,8 @@ Based on the `viz` command from [ODGI](https://github.com/pangenome/odgi):
 - Memory-efficient processing
 - SHA256-based path coloring (matching odgi)
 - Binned mode visualization with multiple coloring modes
-- Path clustering by similarity
+- Path clustering by similarity with dendrogram visualization
+- Path annotations with legend (e.g., population labels)
 - Edge visualization
 - X-axis coordinate display
 
@@ -199,6 +200,41 @@ gfalook -i graph.gfa -o xaxis_chm13_abs.png -x 1000 -y 500 \
 ```
 
 ![X-axis absolute](images/xaxis_chm13_abs.png)
+
+### Path annotations (`-E`)
+
+Label paths by category (e.g., population, sample type) using an annotation file. The annotation file is a TSV with two columns: `prefix` and `annotation`. Each prefix is matched against path names (longest match wins), and categories are displayed as a centered legend at the top with colored indicators next to each path.
+
+```bash
+gfalook -i graph.gfa -o annotation.png -x 1000 -y 500 \
+    -E test/annotations.tsv
+```
+
+![Path annotations](images/annotation.png)
+
+Example annotation file (`test/annotations.tsv`):
+```
+prefix	annotation
+chm13	Reference
+grch38	Reference
+HG00438	CHS
+HG00621	CHS
+HG01891	ACB
+...
+```
+
+### Annotations with clustering (`-E -k -D -m`)
+
+Combine path annotations with clustering, dendrogram, and depth coloring:
+
+```bash
+gfalook -i graph.gfa -o annotation_clustered.png -x 1000 -y 500 \
+    -E test/annotations.tsv -k -D -m
+```
+
+![Annotations with clustering](images/annotation_clustered.png)
+
+The annotation bar appears between the cluster bar and path names, making it easy to see how population labels correlate with similarity clusters.
 
 ## License
 
