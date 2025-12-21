@@ -167,6 +167,17 @@ struct Args {
     )]
     upgma_threshold: Option<f64>,
 
+    /// BED file specifying regions to use for clustering (path_name, start, end).
+    /// Only bp within these regions contribute to clustering similarity.
+    /// Paths not in the BED file are rendered but excluded from clustering.
+    #[arg(
+        long = "cluster-bed",
+        value_name = "FILE",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
+    cluster_bed: Option<PathBuf>,
+
     // === Path Selection ===
     /// List of paths to display in the specified order.
     #[arg(
@@ -1173,6 +1184,146 @@ fn load_prefix_merges(path: &PathBuf, paths: &[GfaPath]) -> std::io::Result<Path
     })
 }
 
+/// A single BED region (0-based, half-open coordinates)
+#[derive(Debug, Clone)]
+struct BedRegion {
+    start: u64, // 0-based inclusive
+    end: u64,   // 0-based exclusive (half-open)
+}
+
+/// BED regions for clustering, organized by path name
+struct ClusteringBedRegions {
+    /// Map from path name to sorted, merged list of regions
+    path_regions: FxHashMap<String, Vec<BedRegion>>,
+}
+
+impl ClusteringBedRegions {
+    /// Check if a path has any BED regions defined
+    fn has_regions(&self, path_name: &str) -> bool {
+        self.path_regions.contains_key(path_name)
+    }
+
+    /// Compute the bp overlap between a segment at [seg_start, seg_end) in path coordinates
+    /// and the BED regions for that path. Returns 0 if path has no regions.
+    fn compute_overlap(&self, path_name: &str, seg_start: u64, seg_end: u64) -> u64 {
+        let regions = match self.path_regions.get(path_name) {
+            Some(r) => r,
+            None => return 0,
+        };
+
+        let mut total_overlap: u64 = 0;
+        for region in regions {
+            // Check if segment overlaps this region
+            if seg_start < region.end && seg_end > region.start {
+                // Compute intersection
+                let overlap_start = seg_start.max(region.start);
+                let overlap_end = seg_end.min(region.end);
+                total_overlap += overlap_end - overlap_start;
+            }
+        }
+        total_overlap
+    }
+}
+
+/// Load BED file for clustering subsetting
+/// Expected format: BED3 (path_name, start, end) - 0-based, half-open
+/// Multiple regions per path are allowed and will be merged/unionized
+fn load_clustering_bed(path: &PathBuf) -> std::io::Result<ClusteringBedRegions> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    // Collect all regions per path
+    let mut raw_regions: FxHashMap<String, Vec<BedRegion>> = FxHashMap::default();
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+
+        // Skip empty lines and comments
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Parse BED3 format: path_name \t start \t end
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 3 {
+            eprintln!(
+                "[gfalook] warning: skipping malformed BED line {} (expected 3+ fields, got {})",
+                line_num + 1,
+                fields.len()
+            );
+            continue;
+        }
+
+        let path_name = fields[0].to_string();
+        let start: u64 = match fields[1].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!(
+                    "[gfalook] warning: skipping BED line {}: invalid start '{}'",
+                    line_num + 1,
+                    fields[1]
+                );
+                continue;
+            }
+        };
+        let end: u64 = match fields[2].parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!(
+                    "[gfalook] warning: skipping BED line {}: invalid end '{}'",
+                    line_num + 1,
+                    fields[2]
+                );
+                continue;
+            }
+        };
+
+        // Validate start < end
+        if start >= end {
+            eprintln!(
+                "[gfalook] warning: skipping BED line {}: start ({}) >= end ({})",
+                line_num + 1,
+                start,
+                end
+            );
+            continue;
+        }
+
+        raw_regions
+            .entry(path_name)
+            .or_default()
+            .push(BedRegion { start, end });
+    }
+
+    // Merge overlapping regions for each path
+    let mut path_regions: FxHashMap<String, Vec<BedRegion>> = FxHashMap::default();
+    for (path_name, mut regions) in raw_regions {
+        // Sort by start position
+        regions.sort_by_key(|r| r.start);
+
+        // Merge overlapping/adjacent regions
+        let mut merged: Vec<BedRegion> = Vec::new();
+        for region in regions {
+            if let Some(last) = merged.last_mut() {
+                if region.start <= last.end {
+                    // Overlapping or adjacent - extend
+                    last.end = last.end.max(region.end);
+                } else {
+                    merged.push(region);
+                }
+            } else {
+                merged.push(region);
+            }
+        }
+        path_regions.insert(path_name, merged);
+    }
+
+    info!("Loaded BED regions for {} paths", path_regions.len());
+
+    Ok(ClusteringBedRegions { path_regions })
+}
+
 /// Annotation data loaded from TSV file
 struct AnnotationData {
     /// Map from prefix to annotation category
@@ -1817,6 +1968,7 @@ fn cluster_paths_by_similarity(
     compute_dendrogram: bool,
     use_upgma: bool,
     upgma_threshold: Option<f64>,
+    bed_regions: Option<&ClusteringBedRegions>,
 ) -> ClusteringResult {
     if paths.is_empty() {
         return ClusteringResult {
@@ -1833,16 +1985,40 @@ fn cluster_paths_by_similarity(
 
     // Build bp-weighted node counts for each path (node_id -> total bp on that node)
     // This matches odgi similarity: for each step, add segment length to that node's count
+    // If bed_regions is provided, only count bp that fall within BED regions
     let path_bp_counts: Vec<FxHashMap<u64, u64>> = paths
         .par_iter()
         .map(|path| {
             let mut counts: FxHashMap<u64, u64> = FxHashMap::default();
+            let mut path_pos: u64 = 0; // Track cumulative position in path coordinates
+
             for step in &path.steps {
                 let seg_len = segment_lengths
                     .get(step.segment_id as usize)
                     .copied()
                     .unwrap_or(0);
-                *counts.entry(step.segment_id).or_insert(0) += seg_len;
+
+                // Compute bp to count for this segment
+                let bp_to_count = match bed_regions {
+                    Some(bed) if bed.has_regions(&path.name) => {
+                        // Path has BED regions: compute overlap
+                        bed.compute_overlap(&path.name, path_pos, path_pos + seg_len)
+                    }
+                    Some(_) => {
+                        // BED file provided but path has no regions: count 0 bp (excluded)
+                        0
+                    }
+                    None => {
+                        // No BED file: use full segment length (original behavior)
+                        seg_len
+                    }
+                };
+
+                if bp_to_count > 0 {
+                    *counts.entry(step.segment_id).or_insert(0) += bp_to_count;
+                }
+
+                path_pos += seg_len;
             }
             counts
         })
@@ -2905,6 +3081,25 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let _scale_x = 1.0; // In binned mode
     let _scale_y = viz_width as f64 / len_to_visualize as f64;
 
+    // Load BED regions for clustering if specified
+    let bed_regions: Option<ClusteringBedRegions> =
+        args.cluster_bed.as_ref().and_then(|p| match load_clustering_bed(p) {
+            Ok(regions) => {
+                if regions.path_regions.is_empty() {
+                    eprintln!(
+                        "[gfalook] warning: BED file is empty or has no valid regions, clustering all paths"
+                    );
+                    None
+                } else {
+                    Some(regions)
+                }
+            }
+            Err(e) => {
+                eprintln!("[gfalook] error: failed to load BED file: {}", e);
+                std::process::exit(1);
+            }
+        });
+
     // Cluster paths by similarity if requested (PNG rendering)
     let cluster_result = if args.cluster_paths {
         debug!(
@@ -2913,9 +3108,32 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         );
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
-        let original_paths = display_paths.clone(); // Save for medoids TSV
+
+        // If BED regions provided, partition paths into those to cluster vs. those excluded
+        let (paths_to_cluster, unclustered_paths): (Vec<&GfaPath>, Vec<&GfaPath>) =
+            if let Some(ref bed) = bed_regions {
+                let (to_cluster, unclustered): (Vec<_>, Vec<_>) = display_paths
+                    .iter()
+                    .partition(|p| bed.has_regions(&p.name));
+                if to_cluster.is_empty() {
+                    eprintln!(
+                        "[gfalook] error: no paths match BED regions, cannot cluster"
+                    );
+                    std::process::exit(1);
+                }
+                debug!(
+                    "BED subsetting: {} paths to cluster, {} paths excluded",
+                    to_cluster.len(),
+                    unclustered.len()
+                );
+                (to_cluster, unclustered)
+            } else {
+                (display_paths.clone(), Vec::new())
+            };
+
+        let original_paths = paths_to_cluster.clone(); // Save for medoids TSV
         let result = cluster_paths_by_similarity(
-            &display_paths,
+            &paths_to_cluster,
             &segment_lengths,
             args.cluster_threshold,
             args.cluster_all_nodes,
@@ -2923,25 +3141,61 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             args.dendrogram || args.use_upgma,
             args.use_upgma,
             args.upgma_threshold,
+            bed_regions.as_ref(),
         );
-        display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
-        // Write cluster assignments to TSV
-        write_cluster_tsv(&args.out, &display_paths, &result);
+
+        // Rebuild display_paths: clustered paths in order, then unclustered
+        display_paths = result
+            .ordering
+            .iter()
+            .map(|&i| paths_to_cluster[i])
+            .collect();
+        let num_clustered = display_paths.len();
+        display_paths.extend(unclustered_paths.clone());
+
+        // Extend cluster_ids for unclustered paths (use num_clusters as special "unclustered" ID)
+        let mut extended_cluster_ids = result.cluster_ids.clone();
+        extended_cluster_ids.extend(std::iter::repeat(result.num_clusters).take(unclustered_paths.len()));
+
+        // Build extended result
+        let extended_result = ClusteringResult {
+            ordering: (0..display_paths.len()).collect(),
+            cluster_ids: extended_cluster_ids,
+            num_clusters: if unclustered_paths.is_empty() {
+                result.num_clusters
+            } else {
+                result.num_clusters + 1 // +1 for "unclustered" group
+            },
+            representatives: result.representatives.clone(),
+            cluster_sizes: {
+                let mut sizes = result.cluster_sizes.clone();
+                if !unclustered_paths.is_empty() {
+                    sizes.push(unclustered_paths.len());
+                }
+                sizes
+            },
+            dendrogram: result.dendrogram.clone(),
+        };
+
+        // Write cluster assignments to TSV (using original result for clustered paths only)
+        write_cluster_tsv(&args.out, &display_paths[..num_clustered], &result);
         // Write medoids TSV
         write_medoids_tsv(&args.out, &original_paths, &result);
 
         // Filter to representatives only if requested (PNG)
-        let result = if args.cluster_representatives {
+        // Note: only applies to clustered paths, unclustered paths are not included
+        let final_result = if args.cluster_representatives {
             let rep_set: FxHashSet<usize> = result.representatives.iter().copied().collect();
             let mut filtered_paths = Vec::new();
             let mut filtered_cluster_ids = Vec::new();
             for (pos, &orig_idx) in result.ordering.iter().enumerate() {
                 if rep_set.contains(&orig_idx) {
-                    filtered_paths.push(display_paths[pos]);
+                    filtered_paths.push(paths_to_cluster[orig_idx]);
                     filtered_cluster_ids.push(result.cluster_ids[pos]);
                 }
             }
             display_paths = filtered_paths;
+            // Don't include unclustered paths when showing representatives only
             ClusteringResult {
                 ordering: (0..display_paths.len()).collect(),
                 cluster_ids: filtered_cluster_ids,
@@ -2951,9 +3205,9 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 dendrogram: result.dendrogram,
             }
         } else {
-            result
+            extended_result
         };
-        Some(result)
+        Some(final_result)
     } else {
         None
     };
@@ -4511,6 +4765,25 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         .bin_width
         .unwrap_or_else(|| len_to_visualize as f64 / viz_width as f64);
 
+    // Load BED regions for clustering if specified (SVG)
+    let bed_regions: Option<ClusteringBedRegions> =
+        args.cluster_bed.as_ref().and_then(|p| match load_clustering_bed(p) {
+            Ok(regions) => {
+                if regions.path_regions.is_empty() {
+                    eprintln!(
+                        "[gfalook] warning: BED file is empty or has no valid regions, clustering all paths"
+                    );
+                    None
+                } else {
+                    Some(regions)
+                }
+            }
+            Err(e) => {
+                eprintln!("[gfalook] error: failed to load BED file: {}", e);
+                std::process::exit(1);
+            }
+        });
+
     // Cluster paths by similarity if requested (SVG rendering)
     let cluster_result = if args.cluster_paths {
         debug!(
@@ -4519,9 +4792,32 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         );
         // Build segment lengths vector for EDR computation
         let segment_lengths: Vec<u64> = graph.segments.iter().map(|s| s.sequence_len).collect();
-        let original_paths = display_paths.clone(); // Save for medoids TSV
+
+        // If BED regions provided, partition paths into those to cluster vs. those excluded
+        let (paths_to_cluster, unclustered_paths): (Vec<&GfaPath>, Vec<&GfaPath>) =
+            if let Some(ref bed) = bed_regions {
+                let (to_cluster, unclustered): (Vec<_>, Vec<_>) = display_paths
+                    .iter()
+                    .partition(|p| bed.has_regions(&p.name));
+                if to_cluster.is_empty() {
+                    eprintln!(
+                        "[gfalook] error: no paths match BED regions, cannot cluster"
+                    );
+                    std::process::exit(1);
+                }
+                debug!(
+                    "BED subsetting: {} paths to cluster, {} paths excluded",
+                    to_cluster.len(),
+                    unclustered.len()
+                );
+                (to_cluster, unclustered)
+            } else {
+                (display_paths.clone(), Vec::new())
+            };
+
+        let original_paths = paths_to_cluster.clone(); // Save for medoids TSV
         let result = cluster_paths_by_similarity(
-            &display_paths,
+            &paths_to_cluster,
             &segment_lengths,
             args.cluster_threshold,
             args.cluster_all_nodes,
@@ -4529,25 +4825,61 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             args.dendrogram || args.use_upgma,
             args.use_upgma,
             args.upgma_threshold,
+            bed_regions.as_ref(),
         );
-        display_paths = result.ordering.iter().map(|&i| display_paths[i]).collect();
-        // Write cluster assignments to TSV
-        write_cluster_tsv(&args.out, &display_paths, &result);
+
+        // Rebuild display_paths: clustered paths in order, then unclustered
+        display_paths = result
+            .ordering
+            .iter()
+            .map(|&i| paths_to_cluster[i])
+            .collect();
+        let num_clustered = display_paths.len();
+        display_paths.extend(unclustered_paths.clone());
+
+        // Extend cluster_ids for unclustered paths (use num_clusters as special "unclustered" ID)
+        let mut extended_cluster_ids = result.cluster_ids.clone();
+        extended_cluster_ids.extend(std::iter::repeat(result.num_clusters).take(unclustered_paths.len()));
+
+        // Build extended result
+        let extended_result = ClusteringResult {
+            ordering: (0..display_paths.len()).collect(),
+            cluster_ids: extended_cluster_ids,
+            num_clusters: if unclustered_paths.is_empty() {
+                result.num_clusters
+            } else {
+                result.num_clusters + 1 // +1 for "unclustered" group
+            },
+            representatives: result.representatives.clone(),
+            cluster_sizes: {
+                let mut sizes = result.cluster_sizes.clone();
+                if !unclustered_paths.is_empty() {
+                    sizes.push(unclustered_paths.len());
+                }
+                sizes
+            },
+            dendrogram: result.dendrogram.clone(),
+        };
+
+        // Write cluster assignments to TSV (using original result for clustered paths only)
+        write_cluster_tsv(&args.out, &display_paths[..num_clustered], &result);
         // Write medoids TSV
         write_medoids_tsv(&args.out, &original_paths, &result);
 
         // Filter to representatives only if requested (SVG)
-        let result = if args.cluster_representatives {
+        // Note: only applies to clustered paths, unclustered paths are not included
+        let final_result = if args.cluster_representatives {
             let rep_set: FxHashSet<usize> = result.representatives.iter().copied().collect();
             let mut filtered_paths = Vec::new();
             let mut filtered_cluster_ids = Vec::new();
             for (pos, &orig_idx) in result.ordering.iter().enumerate() {
                 if rep_set.contains(&orig_idx) {
-                    filtered_paths.push(display_paths[pos]);
+                    filtered_paths.push(paths_to_cluster[orig_idx]);
                     filtered_cluster_ids.push(result.cluster_ids[pos]);
                 }
             }
             display_paths = filtered_paths;
+            // Don't include unclustered paths when showing representatives only
             ClusteringResult {
                 ordering: (0..display_paths.len()).collect(),
                 cluster_ids: filtered_cluster_ids,
@@ -4557,9 +4889,9 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 dendrogram: result.dendrogram,
             }
         } else {
-            result
+            extended_result
         };
-        Some(result)
+        Some(final_result)
     } else {
         None
     };
