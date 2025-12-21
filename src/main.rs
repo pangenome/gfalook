@@ -3112,13 +3112,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         // If BED regions provided, partition paths into those to cluster vs. those excluded
         let (paths_to_cluster, unclustered_paths): (Vec<&GfaPath>, Vec<&GfaPath>) =
             if let Some(ref bed) = bed_regions {
-                let (to_cluster, unclustered): (Vec<_>, Vec<_>) = display_paths
-                    .iter()
-                    .partition(|p| bed.has_regions(&p.name));
+                let (to_cluster, unclustered): (Vec<_>, Vec<_>) =
+                    display_paths.iter().partition(|p| bed.has_regions(&p.name));
                 if to_cluster.is_empty() {
-                    eprintln!(
-                        "[gfalook] error: no paths match BED regions, cannot cluster"
-                    );
+                    eprintln!("[gfalook] error: no paths match BED regions, cannot cluster");
                     std::process::exit(1);
                 }
                 debug!(
@@ -3155,7 +3152,10 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
         // Extend cluster_ids for unclustered paths (use num_clusters as special "unclustered" ID)
         let mut extended_cluster_ids = result.cluster_ids.clone();
-        extended_cluster_ids.extend(std::iter::repeat(result.num_clusters).take(unclustered_paths.len()));
+        extended_cluster_ids.extend(std::iter::repeat_n(
+            result.num_clusters,
+            unclustered_paths.len(),
+        ));
 
         // Build extended result
         let extended_result = ClusteringResult {
@@ -4796,13 +4796,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         // If BED regions provided, partition paths into those to cluster vs. those excluded
         let (paths_to_cluster, unclustered_paths): (Vec<&GfaPath>, Vec<&GfaPath>) =
             if let Some(ref bed) = bed_regions {
-                let (to_cluster, unclustered): (Vec<_>, Vec<_>) = display_paths
-                    .iter()
-                    .partition(|p| bed.has_regions(&p.name));
+                let (to_cluster, unclustered): (Vec<_>, Vec<_>) =
+                    display_paths.iter().partition(|p| bed.has_regions(&p.name));
                 if to_cluster.is_empty() {
-                    eprintln!(
-                        "[gfalook] error: no paths match BED regions, cannot cluster"
-                    );
+                    eprintln!("[gfalook] error: no paths match BED regions, cannot cluster");
                     std::process::exit(1);
                 }
                 debug!(
@@ -4839,7 +4836,10 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
         // Extend cluster_ids for unclustered paths (use num_clusters as special "unclustered" ID)
         let mut extended_cluster_ids = result.cluster_ids.clone();
-        extended_cluster_ids.extend(std::iter::repeat(result.num_clusters).take(unclustered_paths.len()));
+        extended_cluster_ids.extend(std::iter::repeat_n(
+            result.num_clusters,
+            unclustered_paths.len(),
+        ));
 
         // Build extended result
         let extended_result = ClusteringResult {
