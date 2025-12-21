@@ -3634,7 +3634,9 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         for i in 0..num_ticks {
             let t = i as f64 / (num_ticks - 1) as f64;
             // Map tick position to the path's pixel range
-            let x_pos = path_names_width + pixel_start + (t * (path_pixel_width as f64 - 1.0).max(0.0)) as u32;
+            let x_pos = path_names_width
+                + pixel_start
+                + (t * (path_pixel_width as f64 - 1.0).max(0.0)) as u32;
             let coord_value = coord_start as f64 + t * (coord_end - coord_start) as f64;
 
             // Draw tick mark
