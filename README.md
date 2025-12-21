@@ -223,18 +223,19 @@ HG01891	ACB
 ...
 ```
 
-### Annotations with clustering (`-E -k -D -m`)
+### Annotations with clustering (`-E -k -D -m --x-axis`)
 
-Combine path annotations with clustering, dendrogram, and depth coloring:
+Combine path annotations with clustering, dendrogram, depth coloring, and x-axis coordinates:
 
 ```bash
 gfalook -i graph.gfa -o annotation_clustered.png -x 1000 -y 500 \
-    -E test/annotations.tsv -k -D -m
+    -E test/annotations.tsv -k -D -m \
+    --x-axis "chm13#chr6:31825251-31908851" --x-axis-absolute
 ```
 
 ![Annotations with clustering](images/annotation_clustered.png)
 
-The annotation bar appears between the cluster bar and path names, making it easy to see how population labels correlate with similarity clusters.
+This example shows all visualization features combined: legend at top, dendrogram on left, cluster bar, annotation bar (with a gap between them), path names, depth coloring, and x-axis with absolute coordinates at the bottom.
 
 ## License
 

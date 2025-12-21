@@ -3036,6 +3036,9 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         0
     };
 
+    // Gap between cluster bar and annotation bar when both are present
+    let bar_gap: u32 = if cluster_result.is_some() && annotations.is_some() { 4 } else { 0 };
+
     // Legend height (only if annotations are loaded)
     let legend_height: u32 = if annotations.is_some() {
         args.legend_height
@@ -3064,8 +3067,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         0
     };
 
-    // Total left panel width includes dendrogram + cluster bar + annotation bar + path names
-    let path_names_width = dendrogram_width + cluster_bar_width + annotation_bar_width + text_only_width;
+    // Total left panel width includes dendrogram + cluster bar + gap + annotation bar + path names
+    let path_names_width = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_only_width;
 
     let path_space = effective_row_count * pix_per_path + total_gap;
 
@@ -3651,11 +3654,11 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 }
             }
 
-            // Render annotation indicator bar (after cluster bar)
+            // Render annotation indicator bar (after cluster bar + gap)
             if let Some(ref ann) = annotations {
                 if let Some(category) = ann.get_annotation(&path.name) {
                     if let Some(&(ar, ag, ab)) = ann.category_colors.get(category) {
-                        let ann_bar_x_start = dendrogram_width + cluster_bar_width;
+                        let ann_bar_x_start = dendrogram_width + cluster_bar_width + bar_gap;
                         for x in ann_bar_x_start..(ann_bar_x_start + annotation_bar_width) {
                             add_path_step(
                                 &mut path_names_buffer,
@@ -3688,7 +3691,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             let left_padding = max_num_of_chars - num_of_chars;
 
             if args.color_path_names_background {
-                for x in (left_padding as u32 * char_size + dendrogram_width + cluster_bar_width + annotation_bar_width)
+                for x in (left_padding as u32 * char_size + dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width)
                     ..path_names_width
                 {
                     add_path_step(
@@ -4620,6 +4623,9 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         0.0
     };
 
+    // Gap between cluster bar and annotation bar when both are present
+    let bar_gap: f64 = if cluster_result.is_some() && annotations.is_some() { 4.0 } else { 0.0 };
+
     // Legend height (only if annotations are loaded)
     let legend_height: f64 = if annotations.is_some() {
         args.legend_height as f64
@@ -4645,7 +4651,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     let edge_height = (len_to_visualize.min(height_param)) as u32;
     let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
 
-    let total_width = viz_width as f64 + text_width + cluster_bar_width + annotation_bar_width + dendrogram_width;
+    let total_width = viz_width as f64 + text_width + cluster_bar_width + bar_gap + annotation_bar_width + dendrogram_width;
     let total_height = legend_height as u32 + path_space + edge_height;
 
     // Load colorbrewer palette if specified (SVG)
@@ -4824,7 +4830,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let text_y = y_start + (pix_per_path as f64 / 2.0) + (font_size / 3.0);
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="black">{}</text>"#,
-                dendrogram_width + cluster_bar_width + annotation_bar_width + 5.0,
+                dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + 5.0,
                 text_y,
                 "COMPRESSED_MODE"
             ));
@@ -4848,7 +4854,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     // Continue the run
                 } else {
                     // Output the previous run
-                    let x = dendrogram_width + text_width + cluster_bar_width + annotation_bar_width + run_start as f64;
+                    let x = dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
                     let width = (px - run_start + 1) as f64;
                     svg.push_str(&format!(
                         r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -4868,7 +4874,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
         // Output last run
         if let Some(px) = prev_x {
-            let x = dendrogram_width + text_width + cluster_bar_width + annotation_bar_width + run_start as f64;
+            let x = dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
             let width = (px - run_start + 1) as f64;
             svg.push_str(&format!(
                 r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -5102,7 +5108,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     } else {
                         // Output run
                         let x =
-                            dendrogram_width + text_width + cluster_bar_width + annotation_bar_width + run_start as f64;
+                            dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
                         let width = (px - run_start + 1) as f64;
                         svg.push_str(&format!(
                             r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -5120,7 +5126,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
             // Output last run
             if let Some(px) = prev_x {
-                let x = dendrogram_width + text_width + cluster_bar_width + annotation_bar_width + run_start as f64;
+                let x = dendrogram_width + text_width + cluster_bar_width + bar_gap + annotation_bar_width + run_start as f64;
                 let width = (px - run_start + 1) as f64;
                 svg.push_str(&format!(
                     r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
@@ -5228,7 +5234,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 // White text on colored background
                 svg.push_str(&format!(
                     r#"<rect x="{}" y="{}" width="{}" height="{}" fill="rgb({},{},{})"/>"#,
-                    dendrogram_width + cluster_bar_width + annotation_bar_width,
+                    dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width,
                     y_start,
                     text_width,
                     pix_per_path,
@@ -5243,7 +5249,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             };
             svg.push_str(&format!(
                 r#"<text x="{}" y="{}" class="path-name" fill="{}">{}</text>"#,
-                dendrogram_width + cluster_bar_width + annotation_bar_width + 5.0,
+                dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + 5.0,
                 text_y,
                 text_color,
                 escape_xml(&display_name)
@@ -5462,7 +5468,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             };
             svg.push_str(&format!(
                 r#"<line x1="{}" y1="{}" x2="{}" y2="{}" stroke="{}" stroke-width="1"/>"#,
-                dendrogram_width + cluster_bar_width + annotation_bar_width + text_width,
+                dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width,
                 border_y,
                 total_width,
                 border_y,
@@ -5532,7 +5538,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let axis_y = legend_height + path_space_with_gap + axis_padding;
 
         // X start of the axis line (end will be calculated based on path's pangenomic extent)
-        let axis_x_start = dendrogram_width + cluster_bar_width + annotation_bar_width + text_width;
+        let axis_x_start = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width;
 
         // Draw axis label on the left
         // Strip the :start-end range from the label when showing absolute coordinates
@@ -5556,7 +5562,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         let label_y = axis_y + (axis_total_height / 2.0) + (font_size / 3.0);
         svg.push_str(&format!(
             r#"<text x="{}" y="{}" class="path-name" font-weight="bold" fill="black">{}</text>"#,
-            dendrogram_width + cluster_bar_width + annotation_bar_width + 5.0,
+            dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + 5.0,
             label_y,
             escape_xml(&display_label)
         ));
@@ -5711,8 +5717,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             let dist = (b - a) * bin_width;
             let h = (dist * scale_y_edges).min(edge_height as f64 - 1.0);
 
-            let ax = dendrogram_width + cluster_bar_width + annotation_bar_width + text_width + a.round();
-            let bx = dendrogram_width + cluster_bar_width + annotation_bar_width + text_width + b.round();
+            let ax = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width + a.round();
+            let bx = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width + b.round();
 
             // Skip degenerate edges (zero height and minimal width - not visible)
             if h < 1.0 && (bx - ax).abs() < 2.0 {
