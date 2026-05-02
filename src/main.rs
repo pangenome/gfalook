@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Parser)]
 #[command(name = "gfalook")]
@@ -177,6 +178,176 @@ struct Args {
         help_heading = "Clustering"
     )]
     cluster_bed: Option<PathBuf>,
+
+    // === Node Ordering ===
+    /// Reorder nodes so they appear on the x-axis in the order visited by this reference path.
+    /// Unvisited nodes are appended in original GFA order.
+    #[arg(
+        long = "ref-sort",
+        value_name = "PATH_NAME",
+        help_heading = "Node Ordering"
+    )]
+    ref_sort: Option<String>,
+
+    // === 2D Layout ===
+    /// Produce a 2D layout via path-guided SGD instead of the standard 1D visualization.
+    /// Output file (-o) will receive the 2D rendering (PNG or SVG by extension).
+    #[arg(long = "layout", help_heading = "2D Layout")]
+    layout: bool,
+
+    /// Write per-node 2D layout coordinates to this TSV file.
+    /// Columns: node_id, x1, y1, x2, y2. Implies --layout unless used standalone.
+    #[arg(
+        long = "layout-tsv",
+        value_name = "FILE",
+        help_heading = "2D Layout"
+    )]
+    layout_tsv: Option<PathBuf>,
+
+    /// Maximum number of PG-SGD iterations (default: 100). Odgi uses 30 for its serial SGD;
+    /// we default higher because parallel Hogwild updates are individually less productive
+    /// (some are lost to races). Empirically 100 × 20 converges to the stress floor reliably
+    /// across seeds, while 30 × 10 (odgi-exact) can stall at ~10× higher stress.
+    #[arg(
+        long = "sgd-iter",
+        value_name = "N",
+        default_value_t = 100,
+        help_heading = "2D Layout"
+    )]
+    sgd_iter: u32,
+
+    /// Minimum term updates per iteration as a multiplier of Σ path_step_count (default: 20).
+    /// Odgi's default is 10; we double to compensate for parallel-update losses.
+    #[arg(
+        long = "sgd-min-term-updates",
+        value_name = "F",
+        default_value_t = 20.0,
+        help_heading = "2D Layout"
+    )]
+    sgd_min_term_updates: f64,
+
+    /// Zipfian theta for partner-step distance sampling (matches odgi `-a`, default: 0.99).
+    #[arg(
+        long = "sgd-theta",
+        value_name = "F",
+        default_value_t = 0.99,
+        help_heading = "2D Layout"
+    )]
+    sgd_theta: f64,
+
+    /// Final learning rate eta_min (matches odgi `-e`, default: 0.01). Note: this is eta_min,
+    /// not the initial eta — use --sgd-eta-max to control the initial rate.
+    #[arg(
+        long = "sgd-eps",
+        value_name = "F",
+        default_value_t = 0.01,
+        help_heading = "2D Layout"
+    )]
+    sgd_eps: f64,
+
+    /// Initial (maximum) learning rate (matches odgi `-x`, default: max_path_step_count²).
+    #[arg(
+        long = "sgd-eta-max",
+        value_name = "F",
+        help_heading = "2D Layout"
+    )]
+    sgd_eta_max: Option<f64>,
+
+    /// Fraction of iterations spent in the cooling phase (matches odgi `-f`, default: 0.5).
+    /// In cooling phase adj_theta=0.001 (≈flat Zipfian) and partner sampling is always Zipfian.
+    #[arg(
+        long = "sgd-cooling-start",
+        value_name = "F",
+        default_value_t = 0.5,
+        help_heading = "2D Layout"
+    )]
+    sgd_cooling_start: f64,
+
+    /// Iteration at which learning rate is maximum (matches odgi `-F`, default: 0). The eta
+    /// schedule is tent-shaped: eta[t] = eta_max * exp(-lambda * |t - this|).
+    #[arg(
+        long = "sgd-iter-max-lr",
+        value_name = "N",
+        default_value_t = 0,
+        help_heading = "2D Layout"
+    )]
+    sgd_iter_max_lr: u32,
+
+    /// Maximum Zipfian step-distance range (matches odgi `-k`, default: max path step count).
+    #[arg(
+        long = "sgd-zipf-space",
+        value_name = "N",
+        help_heading = "2D Layout"
+    )]
+    sgd_zipf_space: Option<u64>,
+
+    /// Zipfian space threshold above which quantization kicks in (matches odgi `-I`, default: 1000).
+    #[arg(
+        long = "sgd-zipf-space-max",
+        value_name = "N",
+        default_value_t = 1000,
+        help_heading = "2D Layout"
+    )]
+    sgd_zipf_space_max: u64,
+
+    /// Quantization step beyond space_max (matches odgi `-l`, default: 100).
+    #[arg(
+        long = "sgd-zipf-space-quant",
+        value_name = "N",
+        default_value_t = 100,
+        help_heading = "2D Layout"
+    )]
+    sgd_zipf_space_quant: u64,
+
+    /// Random seed for PG-SGD sampling.
+    #[arg(
+        long = "sgd-seed",
+        value_name = "N",
+        default_value_t = 42,
+        help_heading = "2D Layout"
+    )]
+    sgd_seed: u64,
+
+    /// Initialization for 2D layout: "linear" (odgi's default 'd': bp offset on X, N(0,sqrt(2n))
+    /// on Y) or "hilbert" (Hilbert space-filling curve). Matches odgi with -N d default.
+    #[arg(
+        long = "layout-init",
+        value_name = "MODE",
+        default_value = "linear",
+        help_heading = "2D Layout"
+    )]
+    layout_init: String,
+
+    /// Report layout stress metrics (sampled mean/max normalized error) after SGD.
+    /// Use --stress-every N to also report stress every N iterations for convergence tracking.
+    #[arg(long = "stress", help_heading = "2D Layout")]
+    stress: bool,
+
+    /// Report stress every N iterations during SGD (implies --stress).
+    #[arg(
+        long = "stress-every",
+        value_name = "N",
+        help_heading = "2D Layout"
+    )]
+    stress_every: Option<u32>,
+
+    /// Number of path-step pairs to sample when computing stress (default: 100_000).
+    #[arg(
+        long = "stress-samples",
+        value_name = "N",
+        default_value_t = 100_000,
+        help_heading = "2D Layout"
+    )]
+    stress_samples: u64,
+
+    /// Load a pre-computed 2D layout from a TSV file (odgi-layout format: idx X Y component)
+    /// instead of running PG-SGD. Lets us compute stress on an external layout head-to-head.
+    #[arg(
+        long = "load-layout-tsv",
+        value_name = "FILE",
+        help_heading = "2D Layout"
+    )]
+    load_layout_tsv: Option<PathBuf>,
 
     // === Path Selection ===
     /// List of paths to display in the specified order.
@@ -516,6 +687,1193 @@ impl Graph {
             edges: Vec::new(),
         }
     }
+}
+
+/// Reorder nodes so that, on the linear x-axis, reference-path nodes appear in reference
+/// order and non-reference nodes are interpolated between their reference neighbors along
+/// the paths that touch them (so paths that branch off and rejoin the reference don't get
+/// dragged to the far right). All node indices (segments, segment_name_to_id, edges, paths)
+/// and segment_offsets are rewritten in-place.
+fn apply_reference_sort(graph: &mut Graph, ref_name: &str) -> Result<(), String> {
+    let ref_path_idx = graph
+        .paths
+        .iter()
+        .position(|p| p.name == ref_name)
+        .ok_or_else(|| format!("reference path '{}' not found in GFA", ref_name))?;
+
+    let n = graph.segments.len();
+
+    // 1. Assign integer ranks along the reference path, in order-of-first-visit.
+    let mut ref_rank: Vec<Option<u64>> = vec![None; n];
+    let mut next_rank: u64 = 0;
+    for step in &graph.paths[ref_path_idx].steps {
+        let old = step.segment_id as usize;
+        if ref_rank[old].is_none() {
+            ref_rank[old] = Some(next_rank);
+            next_rank += 1;
+        }
+    }
+    let ref_visited = next_rank;
+
+    // 2. For each non-reference node, compute a fractional rank via path interpolation.
+    //    For every path containing N, find the nearest preceding ref-step and following ref-step;
+    //    linearly interpolate a rank between their integer ranks. Aggregate candidates across
+    //    paths by taking the mean (robust to any single path's context).
+    let mut frac_sum: Vec<f64> = vec![0.0; n];
+    let mut frac_cnt: Vec<u32> = vec![0; n];
+
+    for path in &graph.paths {
+        let steps = &path.steps;
+        let k = steps.len();
+        if k == 0 {
+            continue;
+        }
+
+        // Backward pass: for each position, find the next ref step at or after that index.
+        let mut next_ref_ctx: Vec<Option<(usize, u64)>> = vec![None; k];
+        {
+            let mut upcoming: Option<(usize, u64)> = None;
+            for i in (0..k).rev() {
+                let nid = steps[i].segment_id as usize;
+                if let Some(r) = ref_rank[nid] {
+                    upcoming = Some((i, r));
+                }
+                next_ref_ctx[i] = upcoming;
+            }
+        }
+
+        // Forward pass: track last ref step seen, interpolate at each non-ref position.
+        let mut prev_ref: Option<(usize, u64)> = None;
+        for i in 0..k {
+            let nid = steps[i].segment_id as usize;
+            if let Some(r) = ref_rank[nid] {
+                prev_ref = Some((i, r));
+                continue;
+            }
+            let candidate: f64 = match (prev_ref, next_ref_ctx[i]) {
+                (Some((pi, pr)), Some((ni, nr))) if ni > pi => {
+                    let frac = (i - pi) as f64 / (ni - pi) as f64;
+                    pr as f64 + (nr as f64 - pr as f64) * frac
+                }
+                (Some((_, pr)), _) => pr as f64 + 0.5,
+                (_, Some((_, nr))) => nr as f64 - 0.5,
+                (None, None) => continue,
+            };
+            frac_sum[nid] += candidate;
+            frac_cnt[nid] += 1;
+        }
+    }
+
+    // 3. Build a sortable key per node:
+    //    reference nodes: their integer rank (as f64)
+    //    interpolated non-ref nodes: mean candidate rank
+    //    orphans (no ref context seen on any path): rank after everything, in original order
+    let orphan_base: f64 = ref_visited as f64 + n as f64; // far right
+    let mut keys: Vec<(f64, u64)> = Vec::with_capacity(n);
+    for old in 0..n {
+        let key = if let Some(r) = ref_rank[old] {
+            r as f64
+        } else if frac_cnt[old] > 0 {
+            frac_sum[old] / frac_cnt[old] as f64
+        } else {
+            orphan_base + old as f64
+        };
+        keys.push((key, old as u64));
+    }
+    keys.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+
+    let mut old_to_new: Vec<u64> = vec![0; n];
+    for (new_rank, (_, old)) in keys.iter().enumerate() {
+        old_to_new[*old as usize] = new_rank as u64;
+    }
+
+    // Build inverse map new_to_old and reorder segments without Clone bounds on the vec.
+    let mut new_to_old: Vec<u64> = vec![0; n];
+    for (old, &new) in old_to_new.iter().enumerate() {
+        new_to_old[new as usize] = old as u64;
+    }
+    let new_segments: Vec<Segment> = new_to_old
+        .iter()
+        .map(|&old| graph.segments[old as usize].clone())
+        .collect();
+    graph.segments = new_segments;
+
+    for id in graph.segment_name_to_id.values_mut() {
+        *id = old_to_new[*id as usize];
+    }
+    for edge in graph.edges.iter_mut() {
+        edge.from_id = old_to_new[edge.from_id as usize];
+        edge.to_id = old_to_new[edge.to_id as usize];
+    }
+    for path in graph.paths.iter_mut() {
+        for step in path.steps.iter_mut() {
+            step.segment_id = old_to_new[step.segment_id as usize];
+        }
+    }
+
+    graph.segment_offsets.clear();
+    let mut offset = 0u64;
+    for seg in &graph.segments {
+        graph.segment_offsets.push(offset);
+        offset += seg.sequence_len;
+    }
+    graph.total_length = offset;
+
+    info!(
+        "Reference-sort by '{}': {} nodes visited by reference, {} appended",
+        ref_name,
+        ref_visited,
+        n as u64 - ref_visited
+    );
+    Ok(())
+}
+
+// ============================================================================
+// 2D Layout via Path-Guided SGD
+// ============================================================================
+
+/// Xoshiro256+ — the RNG odgi uses (via XoshiroCpp). 256-bit state, no short cycles,
+/// better equidistribution than xorshift64.
+struct Xorshift64 {
+    s: [u64; 4],
+}
+impl Xorshift64 {
+    fn new(seed: u64) -> Self {
+        // Seed the 256-bit state with splitmix64 expansion (the recommended approach per
+        // xoshiro authors — guarantees non-zero state and decorrelation across seeds).
+        let mut sm = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
+        let mut s = [0u64; 4];
+        for slot in &mut s {
+            sm = splitmix64(sm);
+            *slot = sm;
+        }
+        Self { s }
+    }
+    #[inline]
+    fn next_u64(&mut self) -> u64 {
+        let result = self.s[0].wrapping_add(self.s[3]);
+        let t = self.s[1] << 17;
+        self.s[2] ^= self.s[0];
+        self.s[3] ^= self.s[1];
+        self.s[1] ^= self.s[2];
+        self.s[0] ^= self.s[3];
+        self.s[2] ^= t;
+        self.s[3] = self.s[3].rotate_left(45);
+        result
+    }
+    #[inline]
+    fn uniform(&mut self) -> f64 {
+        // top 53 bits → f64 in [0, 1)
+        (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
+    }
+    #[inline]
+    fn range_u64(&mut self, bound: u64) -> u64 {
+        if bound == 0 {
+            0
+        } else {
+            self.next_u64() % bound
+        }
+    }
+}
+
+/// Hilbert curve d2xy: for a square of side 2^order, map an index d in [0, 4^order)
+/// to its (x, y) cell. Adjacent indices always map to adjacent cells (distance 1).
+fn hilbert_d2xy(order: u32, mut d: u64) -> (u64, u64) {
+    let mut x: u64 = 0;
+    let mut y: u64 = 0;
+    let mut s: u64 = 1;
+    while s < (1u64 << order) {
+        let rx = (d / 2) & 1;
+        let ry = (d ^ rx) & 1;
+        if ry == 0 {
+            if rx == 1 {
+                x = s - 1 - x;
+                y = s - 1 - y;
+            }
+            std::mem::swap(&mut x, &mut y);
+        }
+        x += s * rx;
+        y += s * ry;
+        d /= 4;
+        s *= 2;
+    }
+    (x, y)
+}
+
+/// Per-node endpoints in 2D. `coords[2*i]` is endpoint 0 (head / 5' end in forward orientation),
+/// `coords[2*i+1]` is endpoint 1 (tail / 3' end).
+struct Layout2D {
+    coords: Vec<(f64, f64)>,
+}
+
+/// Atomic f64 scalar via AtomicU64 bit storage. All ops Relaxed.
+#[inline]
+fn atomic_f64_load(a: &AtomicU64) -> f64 {
+    f64::from_bits(a.load(Ordering::Relaxed))
+}
+/// True Hogwild update — raw load, compute, store. Matches odgi's
+/// `X[i].store(X[i].load() - r_x)`. Multiple threads racing on the same endpoint lose
+/// updates, which acts as implicit regularization and makes mu=1 full-Newton updates stable.
+#[inline]
+fn atomic_f64_add(a: &AtomicU64, delta: f64) {
+    let bits = a.load(Ordering::Relaxed);
+    let new = f64::from_bits(bits) + delta;
+    a.store(new.to_bits(), Ordering::Relaxed);
+}
+
+/// splitmix64 — used to produce well-mixed seeds for per-thread xorshift RNGs.
+#[inline]
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// Box-Muller Gaussian sample.
+#[inline]
+fn gaussian(rng: &mut Xorshift64, mean: f64, std: f64) -> f64 {
+    let u1 = (1.0 - rng.uniform()).max(1e-300); // (0, 1] avoiding log(0)
+    let u2 = rng.uniform();
+    let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+    mean + z * std
+}
+
+/// Sample an integer z in [1, b] with Zipfian P(z) ∝ 1/z^theta, using the dirty-Zipfian
+/// inverse-CDF approximation (odgi / Gray-Haas):
+///   alpha = 1/(1-theta)
+///   eta   = (1 - (2/b)^(1-theta)) / (1 - zeta2theta/zeta)
+///   uz = u * zeta; if uz<1 return 1; if uz<1+0.5^theta return 2;
+///   else return 1 + floor(b * (eta*u - eta + 1)^alpha).
+/// Requires precomputed zeta = Σ_{i=1..b}(1/i)^theta and zeta2theta = 1 + 0.5^theta.
+/// Matches `dirty_zipfian_int_distribution` from odgi's deps.
+#[inline]
+fn dirty_zipf_sample(
+    rng: &mut Xorshift64,
+    b: u64,
+    theta: f64,
+    zeta: f64,
+    zeta2theta: f64,
+) -> u64 {
+    if b <= 1 {
+        return 1;
+    }
+    let alpha = 1.0 / (1.0 - theta);
+    let eta_z = (1.0 - (2.0 / b as f64).powf(1.0 - theta)) / (1.0 - zeta2theta / zeta);
+    let u = rng.uniform();
+    let uz = u * zeta;
+    if uz < 1.0 {
+        return 1;
+    }
+    if uz < 1.0 + 0.5_f64.powf(theta) {
+        return 2;
+    }
+    let v = (eta_z * u - eta_z + 1.0).powf(alpha);
+    let k = 1 + (b as f64 * v) as u64;
+    k.clamp(1, b)
+}
+
+/// Layout quality summary. All errors are relative to target bp (unitless).
+#[derive(Clone, Copy, Debug)]
+struct LayoutStress {
+    n_samples: u64,
+    mean_sq_rel: f64, // mean of ((d_2D - target) / target)^2    -- "stress"
+    mean_abs_rel: f64, // mean of |d_2D - target| / target        -- easier to read
+    max_abs_rel: f64,  // worst-case relative error
+    frac_within_10pct: f64, // fraction of pairs within 10% of target
+}
+
+/// Sample k path-step pairs with odgi's exact sampling (uniform-across-path partner so every
+/// pair distance scale is represented equally), compute 2D vs target bp distances, aggregate
+/// to a LayoutStress report. The endpoint-choice uses the same independent coin flip as the
+/// SGD inner loop, so we measure the quantity the SGD is optimizing.
+fn compute_layout_stress(
+    atoms_x: &[AtomicU64],
+    atoms_y: &[AtomicU64],
+    graph: &Graph,
+    path_cum_bp: &[Vec<u64>],
+    eligible_paths: &[usize],
+    cum_steps: &[u64],
+    total_steps: u64,
+    _theta: f64,
+    seed: u64,
+    k: u64,
+) -> LayoutStress {
+    if total_steps < 2 || k == 0 {
+        return LayoutStress {
+            n_samples: 0,
+            mean_sq_rel: 0.0,
+            mean_abs_rel: 0.0,
+            max_abs_rel: 0.0,
+            frac_within_10pct: 0.0,
+        };
+    }
+    let (sum_sq, sum_abs, max_abs, within, n) = (0..k)
+        .into_par_iter()
+        .fold(
+            || {
+                let thread_idx = rayon::current_thread_index().unwrap_or(0) as u64;
+                let mut s = splitmix64(seed ^ thread_idx.wrapping_mul(0xA0761D6478BD642F));
+                if s == 0 {
+                    s = 1;
+                }
+                (0.0_f64, 0.0_f64, 0.0_f64, 0u64, 0u64, Xorshift64::new(s))
+            },
+            |(mut sq, mut ab, mut mx, mut within, mut n, mut rng), _| {
+                let global_s = rng.range_u64(total_steps);
+                let ei = match cum_steps.binary_search(&global_s) {
+                    Ok(k) => k,
+                    Err(k) => k - 1,
+                };
+                let path_idx = eligible_paths[ei];
+                let path = &graph.paths[path_idx];
+                let path_step_count = path.steps.len();
+                if path_step_count < 2 {
+                    return (sq, ab, mx, within, n, rng);
+                }
+                let s_rank_a = (global_s - cum_steps[ei]) as usize;
+                // Uniform-across-path partner (odgi's "uniform" branch; gives unbiased coverage).
+                let s_rank_b = rng.range_u64(path_step_count as u64) as usize;
+                if s_rank_b == s_rank_a {
+                    return (sq, ab, mx, within, n, rng);
+                }
+                let step_a = &path.steps[s_rank_a];
+                let step_b = &path.steps[s_rank_b];
+                let term_i = step_a.segment_id as usize;
+                let term_j = step_b.segment_id as usize;
+                let term_i_length = graph.segments[term_i].sequence_len;
+                let term_j_length = graph.segments[term_j].sequence_len;
+                let term_i_is_rev = step_a.is_reverse;
+                let term_j_is_rev = step_b.is_reverse;
+                let mut pos_in_path_a = path_cum_bp[path_idx][s_rank_a];
+                let mut pos_in_path_b = path_cum_bp[path_idx][s_rank_b];
+                let coin_a = (rng.next_u64() & 1) == 1;
+                let coin_b = (rng.next_u64() & 1) == 1;
+                let use_other_end_a = if coin_a {
+                    pos_in_path_a += term_i_length;
+                    !term_i_is_rev
+                } else {
+                    term_i_is_rev
+                };
+                let use_other_end_b = if coin_b {
+                    pos_in_path_b += term_j_length;
+                    !term_j_is_rev
+                } else {
+                    term_j_is_rev
+                };
+                let offset_i = if use_other_end_a { 1 } else { 0 };
+                let offset_j = if use_other_end_b { 1 } else { 0 };
+                let target = (pos_in_path_a as i64 - pos_in_path_b as i64).unsigned_abs() as f64;
+                if target < 1.0 {
+                    return (sq, ab, mx, within, n, rng);
+                }
+                let idx_a = 2 * term_i + offset_i;
+                let idx_b = 2 * term_j + offset_j;
+                let x_a = atomic_f64_load(&atoms_x[idx_a]);
+                let y_a = atomic_f64_load(&atoms_y[idx_a]);
+                let x_b = atomic_f64_load(&atoms_x[idx_b]);
+                let y_b = atomic_f64_load(&atoms_y[idx_b]);
+                let dx = x_a - x_b;
+                let dy = y_a - y_b;
+                let d = (dx * dx + dy * dy).sqrt();
+                let rel = (d - target) / target;
+                let abs_rel = rel.abs();
+                sq += rel * rel;
+                ab += abs_rel;
+                if abs_rel > mx {
+                    mx = abs_rel;
+                }
+                if abs_rel <= 0.1 {
+                    within += 1;
+                }
+                n += 1;
+                (sq, ab, mx, within, n, rng)
+            },
+        )
+        .map(|(sq, ab, mx, w, n, _)| (sq, ab, mx, w, n))
+        .reduce(
+            || (0.0, 0.0, 0.0, 0u64, 0u64),
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2.max(b.2), a.3 + b.3, a.4 + b.4),
+        );
+    if n == 0 {
+        return LayoutStress {
+            n_samples: 0,
+            mean_sq_rel: 0.0,
+            mean_abs_rel: 0.0,
+            max_abs_rel: 0.0,
+            frac_within_10pct: 0.0,
+        };
+    }
+    let nf = n as f64;
+    LayoutStress {
+        n_samples: n,
+        mean_sq_rel: sum_sq / nf,
+        mean_abs_rel: sum_abs / nf,
+        max_abs_rel: max_abs,
+        frac_within_10pct: within as f64 / nf,
+    }
+}
+
+/// Load a 2D layout from odgi's TSV format: `idx\tX\tY\tcomponent` (with header).
+/// idx = 2*node_index for endpoint 0, 2*node_index+1 for endpoint 1. n_expected is the
+/// number of nodes (so expected row count is 2*n_expected + 1 with header).
+fn load_layout_from_odgi_tsv(path: &PathBuf, n_expected: usize) -> std::io::Result<Layout2D> {
+    let f = File::open(path)?;
+    let rdr = BufReader::new(f);
+    let mut coords: Vec<(f64, f64)> = vec![(0.0, 0.0); 2 * n_expected];
+    let mut seen = vec![false; 2 * n_expected];
+    let mut count = 0usize;
+    for (i, line) in rdr.lines().enumerate() {
+        let line = line?;
+        if i == 0 && line.starts_with("idx") {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let idx: usize = parts[0].parse().unwrap_or(usize::MAX);
+        if idx >= coords.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "TSV idx {} out of range for {} expected nodes (max idx {})",
+                    idx,
+                    n_expected,
+                    2 * n_expected - 1
+                ),
+            ));
+        }
+        let x: f64 = parts[1].parse().unwrap_or(0.0);
+        let y: f64 = parts[2].parse().unwrap_or(0.0);
+        coords[idx] = (x, y);
+        seen[idx] = true;
+        count += 1;
+    }
+    let missing = seen.iter().filter(|&&s| !s).count();
+    if missing > 0 {
+        info!(
+            "Loaded {} layout rows; {} endpoints missing (zeroed)",
+            count, missing
+        );
+    } else {
+        info!("Loaded {} layout rows for {} nodes", count, n_expected);
+    }
+    Ok(Layout2D { coords })
+}
+
+/// Wrapper around compute_layout_stress that takes a plain Layout2D and rebuilds the
+/// per-path cum_bp + eligible_paths tables the stress function needs.
+fn compute_stress_from_coords(layout: &Layout2D, graph: &Graph, args: &Args) -> LayoutStress {
+    // Stage coords into atomic stores so we can reuse the same stress routine.
+    let n_ep = layout.coords.len();
+    let atoms_x: Vec<AtomicU64> = layout
+        .coords
+        .iter()
+        .map(|&(x, _)| AtomicU64::new(x.to_bits()))
+        .collect();
+    let atoms_y: Vec<AtomicU64> = layout
+        .coords
+        .iter()
+        .map(|&(_, y)| AtomicU64::new(y.to_bits()))
+        .collect();
+    assert_eq!(atoms_x.len(), n_ep);
+    assert_eq!(atoms_y.len(), n_ep);
+
+    let path_cum_bp: Vec<Vec<u64>> = graph
+        .paths
+        .iter()
+        .map(|p| {
+            let mut v = Vec::with_capacity(p.steps.len() + 1);
+            v.push(0u64);
+            let mut cum = 0u64;
+            for s in &p.steps {
+                cum += graph.segments[s.segment_id as usize].sequence_len;
+                v.push(cum);
+            }
+            v
+        })
+        .collect();
+    let eligible_paths: Vec<usize> = graph
+        .paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.steps.len() >= 2)
+        .map(|(i, _)| i)
+        .collect();
+    let mut cum_steps: Vec<u64> = Vec::with_capacity(eligible_paths.len() + 1);
+    cum_steps.push(0);
+    for &pi in &eligible_paths {
+        let prev = *cum_steps.last().unwrap();
+        cum_steps.push(prev + graph.paths[pi].steps.len() as u64);
+    }
+    let total_steps = *cum_steps.last().unwrap();
+    compute_layout_stress(
+        &atoms_x,
+        &atoms_y,
+        graph,
+        &path_cum_bp,
+        &eligible_paths,
+        &cum_steps,
+        total_steps,
+        args.sgd_theta,
+        splitmix64(args.sgd_seed ^ 0xC0FFEE_CAFEBABE),
+        args.stress_samples,
+    )
+}
+
+/// Run path-guided 2D SGD. This is an exact port of odgi `path_linear_sgd_layout`
+/// (src/algorithms/path_sgd_layout.cpp) — same sampling, same weight w = 1/term_dist,
+/// same tent-shaped eta schedule, same cooling-phase semantics, same endpoint coin-flip.
+/// Multi-threaded Hogwild over a shared AtomicU64-backed f64 endpoint store (matching odgi's
+/// `std::vector<std::atomic<double>> X, Y`).
+fn run_path_guided_sgd(graph: &Graph, args: &Args) -> Layout2D {
+    let n = graph.segments.len();
+    let n_ep = 2 * n;
+    // Two separate stores (X, Y) of length 2n, matching odgi's layout exactly.
+    let atoms_x: Vec<AtomicU64> = (0..n_ep).map(|_| AtomicU64::new(0)).collect();
+    let atoms_y: Vec<AtomicU64> = (0..n_ep).map(|_| AtomicU64::new(0)).collect();
+
+    // ---- init ----
+    let total_bp: u64 = graph.segments.iter().map(|s| s.sequence_len).sum();
+    let mean_bp = if n > 0 { (total_bp as f64 / n as f64).max(1.0) } else { 1.0 };
+    let mut init_rng = Xorshift64::new(args.sgd_seed);
+    let init_mode = args.layout_init.to_lowercase();
+    let set_ep = |ep: usize, x: f64, y: f64| {
+        atoms_x[ep].store(x.to_bits(), Ordering::Relaxed);
+        atoms_y[ep].store(y.to_bits(), Ordering::Relaxed);
+    };
+    match init_mode.as_str() {
+        "hilbert" => {
+            let mut order: u32 = 1;
+            while (1u64 << (2 * order)) < n as u64 {
+                order += 1;
+            }
+            let cell_scale = mean_bp;
+            for i in 0..n {
+                let (hx, hy) = hilbert_d2xy(order, i as u64);
+                let (nx, ny) = if i + 1 < n {
+                    let (a, b) = hilbert_d2xy(order, (i + 1) as u64);
+                    (a as f64, b as f64)
+                } else if i > 0 {
+                    let (a, b) = hilbert_d2xy(order, (i - 1) as u64);
+                    (2.0 * hx as f64 - a as f64, 2.0 * hy as f64 - b as f64)
+                } else {
+                    (hx as f64 + 1.0, hy as f64)
+                };
+                let dxc = nx - hx as f64;
+                let dyc = ny - hy as f64;
+                let dc = (dxc * dxc + dyc * dyc).sqrt().max(1e-9);
+                let dirx = dxc / dc;
+                let diry = dyc / dc;
+                let len = graph.segments[i].sequence_len.max(1) as f64;
+                let cx = hx as f64 * cell_scale;
+                let cy = hy as f64 * cell_scale;
+                set_ep(2 * i, cx, cy);
+                set_ep(2 * i + 1, cx + len * dirx, cy + len * diry);
+            }
+            info!("Layout init: hilbert curve order {}", order);
+        }
+        _ => {
+            // Odgi's default "d": X[2i] = bp offset, Y[2i] = N(0, sqrt(2n)); X[2i+1] = bp offset
+            // + node_length, Y[2i+1] = N(0, sqrt(2n)). The gaussian std scales with graph size
+            // so the SGD starts with meaningful y-spread and can find 2D structure.
+            let noise_std = (2.0 * n as f64).sqrt();
+            for i in 0..n {
+                let left = graph.segment_offsets[i] as f64;
+                let right = left + graph.segments[i].sequence_len.max(1) as f64;
+                let jy1 = gaussian(&mut init_rng, 0.0, noise_std);
+                let jy2 = gaussian(&mut init_rng, 0.0, noise_std);
+                set_ep(2 * i, left, jy1);
+                set_ep(2 * i + 1, right, jy2);
+            }
+            info!(
+                "Layout init: linear default ('d'): bp on X, Gaussian(0, {:.2}) on Y",
+                noise_std
+            );
+        }
+    }
+
+    // ---- per-path cumulative bp ----
+    let path_cum_bp: Vec<Vec<u64>> = graph
+        .paths
+        .iter()
+        .map(|p| {
+            let mut v = Vec::with_capacity(p.steps.len() + 1);
+            v.push(0u64);
+            let mut cum = 0u64;
+            for s in &p.steps {
+                cum += graph.segments[s.segment_id as usize].sequence_len;
+                v.push(cum);
+            }
+            v
+        })
+        .collect();
+
+    // ---- eligible paths + cumulative step-count table for global step sampling ----
+    let eligible_paths: Vec<usize> = graph
+        .paths
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.steps.len() >= 2)
+        .map(|(i, _)| i)
+        .collect();
+    if eligible_paths.is_empty() {
+        info!("No paths with >=2 steps; skipping PG-SGD");
+        let coords: Vec<(f64, f64)> = (0..n_ep)
+            .map(|e| (atomic_f64_load(&atoms_x[e]), atomic_f64_load(&atoms_y[e])))
+            .collect();
+        return Layout2D { coords };
+    }
+    let mut cum_steps: Vec<u64> = Vec::with_capacity(eligible_paths.len() + 1);
+    cum_steps.push(0);
+    for &pi in &eligible_paths {
+        let prev = *cum_steps.last().unwrap();
+        cum_steps.push(prev + graph.paths[pi].steps.len() as u64);
+    }
+    let total_steps = *cum_steps.last().unwrap();
+    let max_path_step_count: u64 = eligible_paths
+        .iter()
+        .map(|&pi| graph.paths[pi].steps.len() as u64)
+        .max()
+        .unwrap_or(1);
+
+    // ---- odgi schedule (tent-shaped around iter_with_max_learning_rate) ----
+    // w_min = 1/eta_max (user param); eta_max = 1/w_min = user eta_max.
+    // eta_min = eps / w_max = eps (w_max = 1.0, the weight at term_dist = 1).
+    let eta_max_user = args
+        .sgd_eta_max
+        .unwrap_or((max_path_step_count * max_path_step_count) as f64)
+        .max(1.0);
+    let eta_min = args.sgd_eps.max(1e-12);
+    let iter_max = args.sgd_iter.max(1);
+    let iter_with_max_lr = args.sgd_iter_max_lr.min(iter_max.saturating_sub(1));
+    let lambda = if iter_max > 1 && eta_max_user > eta_min {
+        (eta_max_user / eta_min).ln() / (iter_max as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let mut etas: Vec<f64> = Vec::with_capacity(iter_max as usize + 1);
+    for t in 0..=iter_max as i64 {
+        let dist = (t - iter_with_max_lr as i64).unsigned_abs() as f64;
+        etas.push(eta_max_user * (-lambda * dist).exp());
+    }
+    let first_cooling_iter = (args.sgd_cooling_start * iter_max as f64).floor() as u32;
+
+    // ---- zeta precomputation for dirty_zipf ----
+    // zetas[i] = zeta(i, theta) for i in 1..=space_max; beyond that, quantized.
+    let space = args.sgd_zipf_space.unwrap_or(max_path_step_count);
+    let space_max = args.sgd_zipf_space_max.min(space).max(1);
+    let space_quant = args.sgd_zipf_space_quant.max(1);
+    let zeta_len = if space <= space_max {
+        (space + 1) as usize
+    } else {
+        (space_max + (space - space_max) / space_quant + 1 + 1) as usize
+    };
+    let mut zetas: Vec<f64> = vec![0.0; zeta_len];
+    let zeta2theta = 1.0 + (0.5_f64).powf(args.sgd_theta); // zeta(2, theta) = 1 + 0.5^theta
+    {
+        let mut acc = 0.0;
+        for i in 1..=space {
+            acc += (1.0 / i as f64).powf(args.sgd_theta);
+            if i <= space_max {
+                zetas[i as usize] = acc;
+            }
+            if i >= space_max && (i - space_max).is_multiple_of(space_quant) {
+                let idx = (space_max + 1 + (i - space_max) / space_quant) as usize;
+                if idx < zetas.len() {
+                    zetas[idx] = acc;
+                }
+            }
+        }
+    }
+
+    // Computes quantized zeta-index for a given jump_space.
+    let zeta_index = move |jump_space: u64| -> usize {
+        if jump_space <= space_max {
+            jump_space as usize
+        } else {
+            (space_max + 1 + (jump_space - space_max) / space_quant) as usize
+        }
+    };
+
+    // ---- updates-per-iter: odgi uses min_term_updates × Σ path_step_count ----
+    let updates_per_iter = (args.sgd_min_term_updates * total_steps as f64).max(1.0) as u64;
+    let n_threads = rayon::current_num_threads();
+    info!(
+        "PG-SGD (odgi): {} iters × {} updates/iter ({} nodes, {} paths, {} total steps, {} threads, eta_max={:.1} eta_min={:.3} theta={} cooling@iter={})",
+        iter_max,
+        updates_per_iter,
+        n,
+        eligible_paths.len(),
+        total_steps,
+        n_threads,
+        eta_max_user,
+        eta_min,
+        args.sgd_theta,
+        first_cooling_iter
+    );
+
+    // Move atoms into shared refs for closures.
+    let atoms_x_ref = &atoms_x;
+    let atoms_y_ref = &atoms_y;
+    let zetas_ref = &zetas;
+    let path_cum_bp_ref = &path_cum_bp;
+    let eligible_paths_ref = &eligible_paths;
+    let cum_steps_ref = &cum_steps;
+
+    let stress_on = args.stress || args.stress_every.is_some();
+    let stress_every = args.stress_every.unwrap_or(0);
+    let stress_seed = splitmix64(args.sgd_seed.wrapping_add(0x5A17BE1FEE1DEAD5));
+
+    if stress_on {
+        let s0 = compute_layout_stress(
+            atoms_x_ref,
+            atoms_y_ref,
+            graph,
+            path_cum_bp_ref,
+            eligible_paths_ref,
+            cum_steps_ref,
+            total_steps,
+            args.sgd_theta,
+            stress_seed,
+            args.stress_samples,
+        );
+        info!(
+            "stress [iter   0]: mean_sq_rel={:.4} mean_abs_rel={:.3} max_abs_rel={:.3} within_10pct={:.1}%  (n={})",
+            s0.mean_sq_rel, s0.mean_abs_rel, s0.max_abs_rel, s0.frac_within_10pct * 100.0, s0.n_samples
+        );
+    }
+
+    for t in 0..iter_max {
+        let eta = etas[t as usize];
+        let cooling = t >= first_cooling_iter;
+        let iter_seed =
+            splitmix64(args.sgd_seed ^ ((t as u64).wrapping_mul(0x9E3779B97F4A7C15)));
+
+        (0..updates_per_iter).into_par_iter().for_each_init(
+            || {
+                let thread_idx = rayon::current_thread_index().unwrap_or(0) as u64;
+                let mut seed =
+                    splitmix64(iter_seed ^ thread_idx.wrapping_mul(0xA0761D6478BD642F));
+                if seed == 0 {
+                    seed = 1;
+                }
+                Xorshift64::new(seed)
+            },
+            |rng, _| {
+                // (1) Pick first step uniformly across all eligible paths' steps.
+                let global_s = rng.range_u64(total_steps);
+                let ei = match cum_steps_ref.binary_search(&global_s) {
+                    Ok(k) => k,
+                    Err(k) => k - 1,
+                };
+                let path_idx = eligible_paths_ref[ei];
+                let path = &graph.paths[path_idx];
+                let path_step_count = path.steps.len();
+                if path_step_count < 2 {
+                    return;
+                }
+                let s_rank_a = (global_s - cum_steps_ref[ei]) as usize;
+
+                // (2) Pick partner step s_rank_b. If cooling OR flip==1: Zipfian step-distance.
+                //     Else: uniform random across path.
+                let s_rank_b = if cooling || (rng.next_u64() & 1 == 1) {
+                    // Decide direction (backward if s_rank_a > 0 AND flip==1, OR at path end).
+                    let go_backward = (s_rank_a > 0 && (rng.next_u64() & 1 == 1))
+                        || s_rank_a == path_step_count - 1;
+                    if go_backward {
+                        let jump_space = space.min(s_rank_a as u64).max(1);
+                        let z_idx = zeta_index(jump_space);
+                        let zi = dirty_zipf_sample(
+                            rng,
+                            jump_space,
+                            args.sgd_theta,
+                            zetas_ref[z_idx],
+                            zeta2theta,
+                        );
+                        s_rank_a.saturating_sub(zi as usize)
+                    } else {
+                        let jump_space = space.min((path_step_count - s_rank_a - 1) as u64).max(1);
+                        let z_idx = zeta_index(jump_space);
+                        let zi = dirty_zipf_sample(
+                            rng,
+                            jump_space,
+                            args.sgd_theta,
+                            zetas_ref[z_idx],
+                            zeta2theta,
+                        );
+                        (s_rank_a + zi as usize).min(path_step_count - 1)
+                    }
+                } else {
+                    rng.range_u64(path_step_count as u64) as usize
+                };
+                // Do NOT skip s_rank_b == s_rank_a: with different endpoint coin flips that
+                // becomes the intra-node length constraint (target = node length, idx_a ≠ idx_b).
+                // Odgi relies on this to keep each node's two endpoints sequence_len apart.
+
+                // (3) Node lengths and orientation of each step.
+                let step_a = &path.steps[s_rank_a];
+                let step_b = &path.steps[s_rank_b];
+                let term_i = step_a.segment_id as usize;
+                let term_j = step_b.segment_id as usize;
+                let term_i_length = graph.segments[term_i].sequence_len;
+                let term_j_length = graph.segments[term_j].sequence_len;
+                let term_i_is_rev = step_a.is_reverse;
+                let term_j_is_rev = step_b.is_reverse;
+
+                // (4) Start positions of each step in the path (bp coordinates).
+                let mut pos_in_path_a = path_cum_bp_ref[path_idx][s_rank_a];
+                let mut pos_in_path_b = path_cum_bp_ref[path_idx][s_rank_b];
+
+                // (5) Independent coin flip per side: which endpoint of each node to use.
+                let coin_a = (rng.next_u64() & 1) == 1;
+                let coin_b = (rng.next_u64() & 1) == 1;
+                // Matches odgi's transform: flipping the coin extends pos by node length
+                // (now pointing at the end of the step), and inverts the is_reverse flag.
+                let use_other_end_a = if coin_a {
+                    pos_in_path_a += term_i_length;
+                    !term_i_is_rev
+                } else {
+                    term_i_is_rev
+                };
+                let use_other_end_b = if coin_b {
+                    pos_in_path_b += term_j_length;
+                    !term_j_is_rev
+                } else {
+                    term_j_is_rev
+                };
+                let offset_i = if use_other_end_a { 1 } else { 0 };
+                let offset_j = if use_other_end_b { 1 } else { 0 };
+
+                let mut term_dist = (pos_in_path_a as i64 - pos_in_path_b as i64).unsigned_abs() as f64;
+                if term_dist == 0.0 {
+                    term_dist = 1e-9;
+                }
+
+                // (6) odgi's weight: w = 1/term_dist  (linear, NOT squared).
+                let w_ij = 1.0 / term_dist;
+                let mut mu = eta * w_ij;
+                if mu > 1.0 {
+                    mu = 1.0;
+                }
+                let d_ij = term_dist;
+
+                // (7) Load endpoint positions.
+                let idx_a = 2 * term_i + offset_i;
+                let idx_b = 2 * term_j + offset_j;
+                if idx_a == idx_b {
+                    return;
+                }
+                let x_a = atomic_f64_load(&atoms_x_ref[idx_a]);
+                let y_a = atomic_f64_load(&atoms_y_ref[idx_a]);
+                let x_b = atomic_f64_load(&atoms_x_ref[idx_b]);
+                let y_b = atomic_f64_load(&atoms_y_ref[idx_b]);
+                let mut dx = x_a - x_b;
+                let dy = y_a - y_b;
+                if dx == 0.0 {
+                    dx = 1e-9;
+                }
+                let mag = (dx * dx + dy * dy).sqrt();
+                let delta = mu * (mag - d_ij) / 2.0;
+                let r = delta / mag;
+                let r_x = r * dx;
+                let r_y = r * dy;
+
+                // (8) Apply update via CAS atomic adds.
+                atomic_f64_add(&atoms_x_ref[idx_a], -r_x);
+                atomic_f64_add(&atoms_y_ref[idx_a], -r_y);
+                atomic_f64_add(&atoms_x_ref[idx_b], r_x);
+                atomic_f64_add(&atoms_y_ref[idx_b], r_y);
+            },
+        );
+
+        debug!(
+            "  iter {}/{} eta={:.3} cooling={}",
+            t + 1,
+            iter_max,
+            eta,
+            cooling
+        );
+
+        if stress_every > 0 && ((t + 1) % stress_every == 0 || t + 1 == iter_max) {
+            let s = compute_layout_stress(
+                atoms_x_ref,
+                atoms_y_ref,
+                graph,
+                path_cum_bp_ref,
+                eligible_paths_ref,
+                cum_steps_ref,
+                total_steps,
+                args.sgd_theta,
+                stress_seed ^ (t as u64).wrapping_mul(0xDEADBEEFCAFEBABE),
+                args.stress_samples,
+            );
+            info!(
+                "stress [iter {:>3}]: mean_sq_rel={:.4} mean_abs_rel={:.3} max_abs_rel={:.3} within_10pct={:.1}%",
+                t + 1,
+                s.mean_sq_rel,
+                s.mean_abs_rel,
+                s.max_abs_rel,
+                s.frac_within_10pct * 100.0
+            );
+        }
+    }
+
+    if args.stress && args.stress_every.is_none() {
+        let s = compute_layout_stress(
+            atoms_x_ref,
+            atoms_y_ref,
+            graph,
+            path_cum_bp_ref,
+            eligible_paths_ref,
+            cum_steps_ref,
+            total_steps,
+            args.sgd_theta,
+            stress_seed ^ 0xFFFFFFFF_FFFFFFFF,
+            args.stress_samples,
+        );
+        info!(
+            "stress [final ]: mean_sq_rel={:.4} mean_abs_rel={:.3} max_abs_rel={:.3} within_10pct={:.1}%",
+            s.mean_sq_rel,
+            s.mean_abs_rel,
+            s.max_abs_rel,
+            s.frac_within_10pct * 100.0
+        );
+    }
+
+    let coords: Vec<(f64, f64)> = (0..n_ep)
+        .map(|e| (atomic_f64_load(&atoms_x[e]), atomic_f64_load(&atoms_y[e])))
+        .collect();
+    Layout2D { coords }
+}
+
+/// Write per-node coordinates to TSV: node_name<TAB>x1<TAB>y1<TAB>x2<TAB>y2
+fn write_layout_tsv(
+    layout: &Layout2D,
+    graph: &Graph,
+    out: &PathBuf,
+) -> std::io::Result<()> {
+    // Invert segment_name_to_id for stable name lookup.
+    let mut id_to_name: Vec<String> = vec![String::new(); graph.segments.len()];
+    for (name, id) in &graph.segment_name_to_id {
+        id_to_name[*id as usize] = name.clone();
+    }
+    let mut f = File::create(out)?;
+    writeln!(f, "node\tx1\ty1\tx2\ty2")?;
+    for i in 0..graph.segments.len() {
+        let (x1, y1) = layout.coords[2 * i];
+        let (x2, y2) = layout.coords[2 * i + 1];
+        writeln!(
+            f,
+            "{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}",
+            id_to_name[i], x1, y1, x2, y2
+        )?;
+    }
+    Ok(())
+}
+
+/// Map layout coordinates to pixel space preserving aspect ratio.
+fn layout_to_pixels(
+    layout: &Layout2D,
+    width: u32,
+    height: u32,
+    padding: u32,
+) -> Vec<(i32, i32)> {
+    if layout.coords.is_empty() {
+        return Vec::new();
+    }
+    let (mut xmin, mut xmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for &(x, y) in &layout.coords {
+        if x < xmin {
+            xmin = x;
+        }
+        if x > xmax {
+            xmax = x;
+        }
+        if y < ymin {
+            ymin = y;
+        }
+        if y > ymax {
+            ymax = y;
+        }
+    }
+    let dx = (xmax - xmin).max(1e-9);
+    let dy = (ymax - ymin).max(1e-9);
+    let avail_w = (width.saturating_sub(2 * padding)) as f64;
+    let avail_h = (height.saturating_sub(2 * padding)) as f64;
+    let scale = (avail_w / dx).min(avail_h / dy);
+    let off_x = padding as f64 + (avail_w - dx * scale) / 2.0;
+    let off_y = padding as f64 + (avail_h - dy * scale) / 2.0;
+    layout
+        .coords
+        .iter()
+        .map(|&(x, y)| {
+            let px = off_x + (x - xmin) * scale;
+            let py = off_y + (y - ymin) * scale;
+            (px.round() as i32, py.round() as i32)
+        })
+        .collect()
+}
+
+/// Bresenham line draw onto an RGB buffer.
+fn draw_line_rgb(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    rgb: (u8, u8, u8),
+) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
+    let w = width as i32;
+    let h = height as i32;
+    loop {
+        if x >= 0 && x < w && y >= 0 && y < h {
+            let idx = ((y as u32 * width + x as u32) * 3) as usize;
+            buf[idx] = rgb.0;
+            buf[idx + 1] = rgb.1;
+            buf[idx + 2] = rgb.2;
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+/// Draw a thick line by sweeping parallel Bresenham lines offset perpendicular to the direction.
+/// Thickness is in pixels; thickness=1 is equivalent to draw_line_rgb.
+fn draw_line_rgb_thick(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    rgb: (u8, u8, u8),
+    thickness: u32,
+) {
+    draw_line_rgb(buf, width, height, x0, y0, x1, y1, rgb);
+    if thickness <= 1 {
+        return;
+    }
+    let dx = (x1 - x0) as f64;
+    let dy = (y1 - y0) as f64;
+    let len = (dx * dx + dy * dy).sqrt().max(1e-9);
+    // Perpendicular unit vector.
+    let nx = -dy / len;
+    let ny = dx / len;
+    let half = (thickness / 2) as i32;
+    for k in 1..=half {
+        let ox = (nx * k as f64).round() as i32;
+        let oy = (ny * k as f64).round() as i32;
+        draw_line_rgb(buf, width, height, x0 + ox, y0 + oy, x1 + ox, y1 + oy, rgb);
+        draw_line_rgb(buf, width, height, x0 - ox, y0 - oy, x1 - ox, y1 - oy, rgb);
+    }
+}
+
+/// For an oriented endpoint index: the "exit" endpoint of a node traversed in the given
+/// orientation. Forward traversal exits at endpoint 1 (tail); reverse exits at 0 (head).
+#[inline]
+fn exit_endpoint(id: u64, is_reverse: bool) -> usize {
+    2 * id as usize + if is_reverse { 0 } else { 1 }
+}
+/// Entry endpoint: forward enters at endpoint 0 (head); reverse enters at 1 (tail).
+#[inline]
+fn entry_endpoint(id: u64, is_reverse: bool) -> usize {
+    2 * id as usize + if is_reverse { 1 } else { 0 }
+}
+
+/// Render the 2D layout to PNG. Edges drawn light gray first (beneath), then nodes in black.
+fn render_layout_png(
+    layout: &Layout2D,
+    graph: &Graph,
+    args: &Args,
+) -> std::io::Result<()> {
+    let width = args.width.max(100);
+    let height = args.height.max(100);
+    let padding = 20u32;
+    let mut buf: Vec<u8> = vec![255; (width as usize) * (height as usize) * 3];
+    let px = layout_to_pixels(layout, width, height, padding);
+
+    let edge_color = (200u8, 200u8, 200u8);
+    for e in &graph.edges {
+        let (x1, y1) = px[exit_endpoint(e.from_id, e.from_rev)];
+        let (x2, y2) = px[entry_endpoint(e.to_id, e.to_rev)];
+        draw_line_rgb(&mut buf, width, height, x1, y1, x2, y2, edge_color);
+    }
+    // Nodes drawn thicker so they stand out over the edge tracery.
+    for i in 0..graph.segments.len() {
+        let (x1, y1) = px[2 * i];
+        let (x2, y2) = px[2 * i + 1];
+        draw_line_rgb_thick(&mut buf, width, height, x1, y1, x2, y2, (0, 0, 0), 3);
+    }
+
+    let img = image::RgbImage::from_raw(width, height, buf)
+        .ok_or_else(|| std::io::Error::other("RgbImage build failed"))?;
+    img.save(&args.out)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(())
+}
+
+/// Render the 2D layout to SVG. Edges drawn first (light gray), then nodes (black).
+fn render_layout_svg(layout: &Layout2D, graph: &Graph, args: &Args) -> String {
+    let width = args.width.max(100);
+    let height = args.height.max(100);
+    let padding = 20u32;
+    let px = layout_to_pixels(layout, width, height, padding);
+    let mut out = String::new();
+    out.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
+        width, height, width, height
+    ));
+    out.push_str(&format!(
+        "<rect width=\"{}\" height=\"{}\" fill=\"white\"/>\n",
+        width, height
+    ));
+    out.push_str("<g stroke=\"#c8c8c8\" stroke-width=\"0.5\">\n");
+    for e in &graph.edges {
+        let (x1, y1) = px[exit_endpoint(e.from_id, e.from_rev)];
+        let (x2, y2) = px[entry_endpoint(e.to_id, e.to_rev)];
+        out.push_str(&format!(
+            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"/>\n",
+            x1, y1, x2, y2
+        ));
+    }
+    out.push_str("</g>\n<g stroke=\"black\" stroke-width=\"1\">\n");
+    for i in 0..graph.segments.len() {
+        let (x1, y1) = px[2 * i];
+        let (x2, y2) = px[2 * i + 1];
+        out.push_str(&format!(
+            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\"/>\n",
+            x1, y1, x2, y2
+        ));
+    }
+    out.push_str("</g>\n</svg>\n");
+    out
 }
 
 /// 5x8 bitmap font (matching odgi's font5x8.h)
@@ -6588,7 +7946,7 @@ fn main() {
 
     info!("Starting visualization...");
 
-    let graph = match parse_gfa(&args.idx) {
+    let mut graph = match parse_gfa(&args.idx) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("Error loading GFA file: {}", e);
@@ -6600,12 +7958,73 @@ fn main() {
         eprintln!("Warning: No paths found in the GFA file.");
     }
 
+    if let Some(ref_name) = &args.ref_sort {
+        if let Err(e) = apply_reference_sort(&mut graph, ref_name) {
+            eprintln!("Error applying --ref-sort: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     // Detect output format by file extension
     let is_svg = args
         .out
         .extension()
         .map(|ext| ext.eq_ignore_ascii_case("svg"))
         .unwrap_or(false);
+
+    // 2D layout mode: bypass the standard 1D renderer.
+    if args.layout || args.layout_tsv.is_some() || args.load_layout_tsv.is_some() {
+        let layout = if let Some(path) = &args.load_layout_tsv {
+            info!("Loading 2D layout from {:?} (skipping SGD)...", path);
+            match load_layout_from_odgi_tsv(path, graph.segments.len()) {
+                Ok(l) => {
+                    if args.stress || args.stress_every.is_some() {
+                        let s = compute_stress_from_coords(&l, &graph, &args);
+                        info!(
+                            "stress [loaded]: mean_sq_rel={:.4} mean_abs_rel={:.3} max_abs_rel={:.3} within_10pct={:.1}%  (n={})",
+                            s.mean_sq_rel, s.mean_abs_rel, s.max_abs_rel, s.frac_within_10pct * 100.0, s.n_samples
+                        );
+                    }
+                    l
+                }
+                Err(e) => {
+                    eprintln!("Error loading layout TSV: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            info!("Running path-guided SGD for 2D layout...");
+            run_path_guided_sgd(&graph, &args)
+        };
+
+        if let Some(tsv_path) = &args.layout_tsv {
+            info!("Writing layout TSV to {:?}...", tsv_path);
+            if let Err(e) = write_layout_tsv(&layout, &graph, tsv_path) {
+                eprintln!("Error writing layout TSV: {}", e);
+                std::process::exit(1);
+            }
+        }
+
+        if args.layout {
+            info!("Saving 2D layout to {:?}...", args.out);
+            if is_svg {
+                let svg = render_layout_svg(&layout, &graph, &args);
+                match File::create(&args.out).and_then(|mut f| f.write_all(svg.as_bytes())) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        eprintln!("Error writing SVG: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else if let Err(e) = render_layout_png(&layout, &graph, &args) {
+                eprintln!("Error rendering 2D layout PNG: {}", e);
+                std::process::exit(1);
+            }
+        }
+
+        info!("Done.");
+        return;
+    }
 
     if is_svg {
         info!("Rendering SVG...");
