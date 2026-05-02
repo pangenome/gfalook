@@ -887,8 +887,8 @@ fn hilbert_d2xy(order: u32, mut d: u64) -> (u64, u64) {
     let mut y: u64 = 0;
     let mut s: u64 = 1;
     while s < (1u64 << order) {
-        let rx = ((d / 2) & 1) as u64;
-        let ry = ((d ^ rx) & 1) as u64;
+        let rx = (d / 2) & 1;
+        let ry = (d ^ rx) & 1;
         if ry == 0 {
             if rx == 1 {
                 x = s - 1 - x;
@@ -1383,7 +1383,7 @@ fn run_path_guided_sgd(graph: &Graph, args: &Args) -> Layout2D {
             if i <= space_max {
                 zetas[i as usize] = acc;
             }
-            if i >= space_max && (i - space_max) % space_quant == 0 {
+            if i >= space_max && (i - space_max).is_multiple_of(space_quant) {
                 let idx = (space_max + 1 + (i - space_max) / space_quant) as usize;
                 if idx < zetas.len() {
                     zetas[idx] = acc;
@@ -1833,9 +1833,9 @@ fn render_layout_png(
     }
 
     let img = image::RgbImage::from_raw(width, height, buf)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "RgbImage build failed"))?;
+        .ok_or_else(|| std::io::Error::other("RgbImage build failed"))?;
     img.save(&args.out)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(())
 }
 
