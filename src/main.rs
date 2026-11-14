@@ -6461,17 +6461,21 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                         &FONT_5X8[b'?' as usize]
                     }
                 };
-                write_char(
-                    &mut path_names_buffer,
-                    path_names_width,
-                    base_x,
-                    base_y,
-                    char_data,
-                    char_size,
-                    0,
-                    0,
-                    0,
-                );
+                // Bold for the --ref-axis path
+                let bold = args.ref_axis.as_deref() == Some(path.name.as_str());
+                for dx in 0..1 + bold as u32 {
+                    write_char(
+                        &mut path_names_buffer,
+                        path_names_width,
+                        base_x + dx,
+                        base_y,
+                        char_data,
+                        char_size,
+                        0,
+                        0,
+                        0,
+                    );
+                }
             }
         }
 
@@ -8122,10 +8126,12 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             } else {
                 "black"
             };
+            let bold = if args.ref_axis.as_deref() == Some(path.name.as_str()) { r#" font-weight="bold""# } else { "" };
             svg.push_str(&format!(
-                r#"<text x="{}" y="{}" class="path-name" fill="{}">{}</text>"#,
+                r#"<text x="{}" y="{}" class="path-name"{} fill="{}">{}</text>"#,
                 dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + 5.0,
                 text_y,
+                bold,
                 text_color,
                 escape_xml(&display_name)
             ));
