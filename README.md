@@ -255,7 +255,7 @@ gfalook -i graph.gfa -o genes.png -x 1000 -y 500 -m \
 
 ![Reference axis with bubble ranges](images/ref_axis_bubbles.png)
 
-gfalook logs how many reference steps go back in graph order. When the graph order or strand differs from the reference, `--ref-sort <PATH>` orders the graph by it and the lines stop crossing. This haplotype is on the reverse strand: 1155 of 1156 steps go back without `--ref-sort`, 0 with it.
+gfalook logs how many reference steps go back in graph order. When the graph order or strand differs from the reference, `--ref-sort <PATH>` orders the graph by it and the lines stop crossing. `--ref-sort` also flips nodes so the reference walks them forward, as `odgi groom -R` does: other nodes take the orientation most paths give them, relative to the reference. This haplotype is on the reverse strand: without `--ref-sort`, 1155 of 1156 steps go back and 1156 are reverse. With it, 0 go back and 0 are reverse.
 
 ```bash
 gfalook -i graph.gfa -o ref_axis_reverse.png -x 1000 -y 500 -m \
