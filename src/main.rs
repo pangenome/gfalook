@@ -193,7 +193,8 @@ struct Args {
     cluster_bed: Option<PathBuf>,
 
     // === Node Ordering ===
-    /// Reorder nodes so they appear on the x-axis in the order visited by this reference path.
+    /// Reorder nodes so they appear on the x-axis in the order visited by this reference path,
+    /// and flip nodes so the reference walks them forward (as odgi groom -R).
     /// Unvisited nodes are appended in original GFA order.
     #[arg(
         long = "ref-sort",
@@ -735,6 +736,73 @@ impl Graph {
     }
 }
 
+/// Flip nodes so the reference walks them forward, as odgi groom -R does. Reference nodes
+/// take the orientation of their first reference visit. Other nodes take the orientation
+/// most paths give them, where each path is read in its orientation relative to the
+/// reference (by bp on reference nodes, else by its own majority strand).
+fn orient_by_reference(graph: &mut Graph, ref_idx: usize) {
+    let n = graph.segments.len();
+    let mut flip = vec![false; n];
+    let mut on_ref = vec![false; n];
+    for s in &graph.paths[ref_idx].steps {
+        let id = s.segment_id as usize;
+        if !on_ref[id] {
+            on_ref[id] = true;
+            flip[id] = s.is_reverse;
+        }
+    }
+    let mut votes = vec![0i64; n];
+    for path in &graph.paths {
+        let (mut same, mut opp, mut fwd, mut rev) = (0u64, 0u64, 0u64, 0u64);
+        for s in &path.steps {
+            let (id, len) = (s.segment_id as usize, graph.segments[s.segment_id as usize].sequence_len);
+            if s.is_reverse { rev += len } else { fwd += len }
+            if on_ref[id] {
+                if s.is_reverse != flip[id] { opp += len } else { same += len }
+            }
+        }
+        let anti = if same + opp > 0 { opp > same } else { rev > fwd };
+        for s in &path.steps {
+            let id = s.segment_id as usize;
+            if !on_ref[id] {
+                votes[id] += if s.is_reverse != anti { -1 } else { 1 };
+            }
+        }
+    }
+    for id in 0..n {
+        if !on_ref[id] && votes[id] < 0 {
+            flip[id] = true;
+        }
+    }
+    let rev_steps = |g: &Graph| g.paths.iter().flat_map(|p| &p.steps).filter(|s| s.is_reverse).count();
+    let before = rev_steps(graph);
+    for path in graph.paths.iter_mut() {
+        for s in path.steps.iter_mut() {
+            s.is_reverse ^= flip[s.segment_id as usize];
+        }
+    }
+    info!(
+        "Reference-orient: reverse steps over all paths {} before, {} after, of {}",
+        before,
+        rev_steps(graph),
+        graph.paths.iter().map(|p| p.steps.len()).sum::<usize>()
+    );
+    for e in graph.edges.iter_mut() {
+        e.from_rev ^= flip[e.from_id as usize];
+        e.to_rev ^= flip[e.to_id as usize];
+    }
+    let flipped_ref = (0..n).filter(|&i| on_ref[i] && flip[i]).count();
+    let flipped_other = (0..n).filter(|&i| !on_ref[i] && flip[i]).count();
+    info!(
+        "Reference-orient by '{}': flipped {} of {} reference nodes and {} of {} other nodes",
+        graph.paths[ref_idx].name,
+        flipped_ref,
+        on_ref.iter().filter(|&&r| r).count(),
+        flipped_other,
+        on_ref.iter().filter(|&&r| !r).count()
+    );
+}
+
 /// Reorder nodes so that, on the linear x-axis, reference-path nodes appear in reference
 /// order and non-reference nodes are interpolated between their reference neighbors along
 /// the paths that touch them (so paths that branch off and rejoin the reference don't get
@@ -748,6 +816,9 @@ fn apply_reference_sort(graph: &mut Graph, ref_name: &str) -> Result<(), String>
         .ok_or_else(|| format!("reference path '{}' not found in GFA", ref_name))?;
 
     let n = graph.segments.len();
+
+    // 0. Orient nodes like odgi groom -R
+    orient_by_reference(graph, ref_path_idx);
 
     // 1. Assign integer ranks along the reference path, in order-of-first-visit.
     let mut ref_rank: Vec<Option<u64>> = vec![None; n];
