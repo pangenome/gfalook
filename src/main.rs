@@ -5573,7 +5573,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             }
 
             // Normalize bins
-            for (_, v) in bins.iter_mut() {
+            for v in bins.values_mut() {
                 if v.mean_depth > 0.0 {
                     v.mean_pos /= v.mean_depth;
                     v.mean_uncalled /= v.mean_depth;
@@ -6033,7 +6033,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
 
         // Normalize bin values (PNG)
-        for (_, v) in bins.iter_mut() {
+        for v in bins.values_mut() {
             if v.mean_depth > 0.0 {
                 v.mean_pos /= v.mean_depth;
                 v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
@@ -6213,7 +6213,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             {
                 format!(
                     "{}...",
-                    &label_text
+                    label_text
                         .chars()
                         .take(max_label_chars.saturating_sub(3))
                         .collect::<String>()
@@ -7286,7 +7286,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             }
 
             // Normalize bins
-            for (_, v) in bins.iter_mut() {
+            for v in bins.values_mut() {
                 if v.mean_depth > 0.0 {
                     v.mean_pos /= v.mean_depth;
                     v.mean_uncalled /= v.mean_depth;
@@ -7683,7 +7683,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         }
 
         // Normalize bin values (SVG)
-        for (_, v) in bins.iter_mut() {
+        for v in bins.values_mut() {
             if v.mean_depth > 0.0 {
                 v.mean_pos /= v.mean_depth;
                 v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
