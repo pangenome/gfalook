@@ -121,6 +121,19 @@ struct Args {
     )]
     max_clusters: Option<usize>,
 
+    /// Minimum number of paths per cluster. Clusters smaller than N are
+    /// merged (single-linkage) into their nearest cluster, iteratively from
+    /// the smallest, until every remaining cluster has >= N paths or only one
+    /// cluster remains. Default 1 = no merging.
+    #[arg(
+        long = "min-cluster-size",
+        value_name = "N",
+        default_value = "1",
+        requires = "cluster_paths",
+        help_heading = "Clustering"
+    )]
+    min_cluster_size: usize,
+
     /// Show only one representative path (medoid) per cluster.
     #[arg(
         short = 'K',
@@ -477,6 +490,25 @@ struct Args {
     )]
     color_by_uncalled_bases: bool,
 
+    /// Color bins by within-segment CpG (CG dinucleotide) density on a continuous
+    /// light-grey -> near-black gradient. By default 0% CG density renders as
+    /// light grey and the saturation point (full black) is at the value set by
+    /// --cpg-density-max (default 0.10 = 10 CG per 100 bp = typical CpG island).
+    #[arg(long = "color-by-cpg-density", help_heading = "Coloring")]
+    color_by_cpg_density: bool,
+
+    /// CG density (fraction of CG dinucleotides per bp, 0.0 - 0.5) at which
+    /// --color-by-cpg-density is fully saturated to near-black. Default 0.10
+    /// (= 10 CG per 100 bp, typical CpG-island density).
+    #[arg(
+        long = "cpg-density-max",
+        value_name = "F",
+        default_value_t = 0.10,
+        requires = "color_by_cpg_density",
+        help_heading = "Coloring"
+    )]
+    cpg_density_max: f64,
+
     /// Color nodes listed in FILE in red and all other nodes in grey.
     #[arg(
         short = 'J',
@@ -630,7 +662,8 @@ struct Args {
 #[derive(Debug, Clone)]
 struct Segment {
     sequence_len: u64,
-    n_count: u64, // Number of uncalled bases (N's) in the sequence
+    n_count: u64,  // Number of uncalled bases (N's) in the sequence
+    cg_count: u64, // Number of within-segment CG dinucleotides (palindromic)
 }
 
 /// An edge between two segments
@@ -2586,14 +2619,31 @@ fn parse_gfa(path: &PathBuf) -> std::io::Result<Graph> {
             if parts.len() >= 3 {
                 let name = parts[1].to_string();
                 let seq = parts[2];
-                let seq_len = seq.len() as u64;
+                let bytes = seq.as_bytes();
+                let seq_len = bytes.len() as u64;
                 // Count uncalled bases (N's)
-                let n_count = seq.bytes().filter(|&b| b == b'N' || b == b'n').count() as u64;
+                let n_count = bytes
+                    .iter()
+                    .filter(|&&b| b == b'N' || b == b'n')
+                    .count() as u64;
+                // Count within-segment CG dinucleotides (case-insensitive). CG is its own
+                // reverse-complement, so the count is orientation-independent.
+                let mut cg_count: u64 = 0;
+                if bytes.len() >= 2 {
+                    for w in bytes.windows(2) {
+                        let a = w[0] | 0x20;
+                        let b = w[1] | 0x20;
+                        if a == b'c' && b == b'g' {
+                            cg_count += 1;
+                        }
+                    }
+                }
                 let id = graph.segments.len() as u64;
                 graph.segment_name_to_id.insert(name, id);
                 graph.segments.push(Segment {
                     sequence_len: seq_len,
                     n_count,
+                    cg_count,
                 });
             }
         }
@@ -3708,6 +3758,91 @@ fn jaccard_to_edr(jaccard: f64) -> f64 {
     (1.0 - jaccard) / (1.0 + jaccard)
 }
 
+/// Iteratively merge the smallest cluster (size < min_size) into its nearest
+/// cluster using single-linkage distance (min pairwise distance between any
+/// member of the small cluster and any member of another cluster). Stops when
+/// every remaining cluster has size >= min_size or only one cluster remains.
+/// Cluster IDs are canonicalized to a contiguous 0..k range. Returns k.
+fn merge_small_clusters(
+    cluster_assignments: &mut [usize],
+    dist_matrix: &[Vec<f64>],
+    min_size: usize,
+) -> usize {
+    let n = cluster_assignments.len();
+    if n == 0 {
+        return 0;
+    }
+
+    loop {
+        let num_clusters = cluster_assignments
+            .iter()
+            .max()
+            .map(|&m| m + 1)
+            .unwrap_or(1);
+        let mut sizes = vec![0usize; num_clusters];
+        for &c in cluster_assignments.iter() {
+            sizes[c] += 1;
+        }
+
+        let live: Vec<usize> = (0..num_clusters).filter(|&c| sizes[c] > 0).collect();
+        if live.len() <= 1 {
+            break;
+        }
+
+        let (small_id, small_size) = live
+            .iter()
+            .map(|&c| (c, sizes[c]))
+            .min_by_key(|&(_, s)| s)
+            .unwrap();
+        if small_size >= min_size {
+            break;
+        }
+
+        // Single-linkage: find the nearest non-small cluster.
+        let small_members: Vec<usize> = (0..n)
+            .filter(|&i| cluster_assignments[i] == small_id)
+            .collect();
+        let mut best_target = small_id;
+        let mut best_dist = f64::INFINITY;
+        for &i in &small_members {
+            for j in 0..n {
+                let cj = cluster_assignments[j];
+                if cj == small_id {
+                    continue;
+                }
+                let d = dist_matrix[i][j];
+                if d < best_dist {
+                    best_dist = d;
+                    best_target = cj;
+                }
+            }
+        }
+        if best_target == small_id {
+            break;
+        }
+        debug!(
+            "Merging cluster {} (size {}) -> cluster {} (single-linkage dist {:.4})",
+            small_id, small_size, best_target, best_dist
+        );
+        for &i in &small_members {
+            cluster_assignments[i] = best_target;
+        }
+    }
+
+    // Canonicalize cluster IDs to 0..k contiguous range.
+    let mut id_map: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut next_id = 0usize;
+    for c in cluster_assignments.iter_mut() {
+        let new_id = *id_map.entry(*c).or_insert_with(|| {
+            let id = next_id;
+            next_id += 1;
+            id
+        });
+        *c = new_id;
+    }
+    next_id
+}
+
 /// Cluster paths by EDR (estimated difference rate)
 /// Uses base-pair weighted Jaccard similarity like odgi similarity
 /// If use_upgma is true, uses pure UPGMA hierarchical clustering with tree cutting
@@ -3722,6 +3857,7 @@ fn cluster_paths_by_similarity(
     use_upgma: bool,
     upgma_threshold: Option<f64>,
     bed_regions: Option<&ClusteringBedRegions>,
+    min_cluster_size: usize,
 ) -> ClusteringResult {
     if paths.is_empty() {
         return ClusteringResult {
@@ -3959,11 +4095,25 @@ fn cluster_paths_by_similarity(
         (clusters, None)
     };
 
+    let mut cluster_assignments = cluster_assignments;
     let num_clusters = cluster_assignments
         .iter()
         .max()
         .map(|&m| m + 1)
         .unwrap_or(1);
+
+    // Optional post-processing: merge clusters smaller than min_cluster_size into
+    // their nearest cluster (single-linkage), iteratively from the smallest.
+    let num_clusters = if min_cluster_size > 1 && num_clusters > 1 {
+        let merged = merge_small_clusters(&mut cluster_assignments, &dist_matrix, min_cluster_size);
+        debug!(
+            "min-cluster-size={}: merged {} -> {} clusters",
+            min_cluster_size, num_clusters, merged
+        );
+        merged
+    } else {
+        num_clusters
+    };
 
     // Group paths by cluster
     let mut cluster_members: Vec<Vec<usize>> = vec![Vec::new(); num_clusters];
@@ -4113,6 +4263,7 @@ struct BinInfo {
     mean_inv: f64,
     mean_pos: f64,      // mean position within path (for darkness gradient)
     mean_uncalled: f64, // proportion of uncalled bases (N's) in bin
+    mean_cpg: f64,      // density of within-segment CG dinucleotides (CGs / bp) in bin
     highlighted: bool,  // whether this bin contains highlighted nodes
 }
 
@@ -4745,6 +4896,19 @@ fn add_edge_point(buffer: &mut [u8], width: u32, x: u32, y: u32, path_space: u32
     }
 }
 
+/// Continuous greyscale gradient for CpG density: light grey at 0, near-black at `density_max`.
+/// `density` is CG dinucleotides per bp (0.0..0.5). `density_max` is the saturation point
+/// (e.g. 0.10 = 10 CGs per 100 bp = typical CpG-island density). Above the max we clamp to
+/// near-black; below 0 we clamp to light grey.
+fn cpg_density_color(density: f64, density_max: f64) -> (u8, u8, u8) {
+    let t = (density / density_max).clamp(0.0, 1.0);
+    // light grey -> near-black linear interpolation
+    let lo: f64 = 235.0;
+    let hi: f64 = 25.0;
+    let v = (lo + (hi - lo) * t).round() as u8;
+    (v, v, v)
+}
+
 /// Get color for depth using colorbrewer palette (with optional grey for low coverage).
 /// Matches odgi's behavior: each palette color covers exactly 1 depth unit.
 /// Cuts are at 0.5, 1.5, 2.5, ... with grey prepended for low coverage unless no_grey_depth.
@@ -4902,6 +5066,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             args.use_upgma,
             args.upgma_threshold,
             bed_regions.as_ref(),
+            args.min_cluster_size,
         );
 
         // Rebuild display_paths: clustered paths in order, then unclustered
@@ -5370,8 +5535,14 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     let offset = graph.segment_offsets[seg_id];
                     let seg_len = graph.segments[seg_id].sequence_len;
                     let n_count = graph.segments[seg_id].n_count;
+                    let cg_count = graph.segments[seg_id].cg_count;
                     let n_proportion = if seg_len > 0 {
                         n_count as f64 / seg_len as f64
+                    } else {
+                        0.0
+                    };
+                    let cg_proportion = if seg_len > 0 {
+                        cg_count as f64 / seg_len as f64
                     } else {
                         0.0
                     };
@@ -5392,6 +5563,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                         }
                         entry.mean_pos += path_pos as f64;
                         entry.mean_uncalled += n_proportion;
+                        entry.mean_cpg += cg_proportion;
                         if is_highlighted {
                             entry.highlighted = true;
                         }
@@ -5405,6 +5577,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 if v.mean_depth > 0.0 {
                     v.mean_pos /= v.mean_depth;
                     v.mean_uncalled /= v.mean_depth;
+                    v.mean_cpg /= v.mean_depth;
                 }
                 v.mean_inv /= if v.mean_depth > 0.0 {
                     v.mean_depth
@@ -5528,6 +5701,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 } else if args.color_by_uncalled_bases {
                     let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
                     (0, green, 0)
+                } else if args.color_by_cpg_density {
+                    cpg_density_color(bin_info.mean_cpg, args.cpg_density_max)
                 } else if args.show_strand {
                     let apply_strand = args
                         .alignment_prefix
@@ -5820,9 +5995,15 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 let offset = graph.segment_offsets[seg_id];
                 let seg_len = graph.segments[seg_id].sequence_len;
                 let n_count = graph.segments[seg_id].n_count;
+                let cg_count = graph.segments[seg_id].cg_count;
                 // Proportion of N's in this segment (for uncalled base coloring)
                 let n_proportion = if seg_len > 0 {
                     n_count as f64 / seg_len as f64
+                } else {
+                    0.0
+                };
+                let cg_proportion = if seg_len > 0 {
+                    cg_count as f64 / seg_len as f64
                 } else {
                     0.0
                 };
@@ -5842,6 +6023,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                     }
                     entry.mean_pos += path_pos as f64;
                     entry.mean_uncalled += n_proportion;
+                    entry.mean_cpg += cg_proportion;
                     if is_highlighted {
                         entry.highlighted = true;
                     }
@@ -5855,6 +6037,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
             if v.mean_depth > 0.0 {
                 v.mean_pos /= v.mean_depth;
                 v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
+                v.mean_cpg /= v.mean_depth;
             }
             v.mean_inv /= if v.mean_depth > 0.0 {
                 v.mean_depth
@@ -5887,6 +6070,8 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
                 // Black to green gradient based on proportion of uncalled bases (N's)
                 let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
                 (0, green, 0)
+            } else if args.color_by_cpg_density {
+                cpg_density_color(bin_info.mean_cpg, args.cpg_density_max)
             } else if args.show_strand {
                 // Check if alignment_prefix applies (if set, only apply to matching paths)
                 let apply_strand = args
@@ -6586,6 +6771,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             args.use_upgma,
             args.upgma_threshold,
             bed_regions.as_ref(),
+            args.min_cluster_size,
         );
 
         // Rebuild display_paths: clustered paths in order, then unclustered
@@ -7062,8 +7248,14 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     let offset = graph.segment_offsets[seg_id];
                     let seg_len = graph.segments[seg_id].sequence_len;
                     let n_count = graph.segments[seg_id].n_count;
+                    let cg_count = graph.segments[seg_id].cg_count;
                     let n_proportion = if seg_len > 0 {
                         n_count as f64 / seg_len as f64
+                    } else {
+                        0.0
+                    };
+                    let cg_proportion = if seg_len > 0 {
+                        cg_count as f64 / seg_len as f64
                     } else {
                         0.0
                     };
@@ -7084,6 +7276,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                         }
                         entry.mean_pos += path_pos as f64;
                         entry.mean_uncalled += n_proportion;
+                        entry.mean_cpg += cg_proportion;
                         if is_highlighted {
                             entry.highlighted = true;
                         }
@@ -7097,6 +7290,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 if v.mean_depth > 0.0 {
                     v.mean_pos /= v.mean_depth;
                     v.mean_uncalled /= v.mean_depth;
+                    v.mean_cpg /= v.mean_depth;
                 }
                 v.mean_inv /= if v.mean_depth > 0.0 {
                     v.mean_depth
@@ -7208,6 +7402,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 } else if args.color_by_uncalled_bases {
                     let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
                     (0, green, 0)
+                } else if args.color_by_cpg_density {
+                    cpg_density_color(bin_info.mean_cpg, args.cpg_density_max)
                 } else if args.show_strand {
                     let apply_strand = args
                         .alignment_prefix
@@ -7449,9 +7645,15 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 let offset = graph.segment_offsets[seg_id];
                 let seg_len = graph.segments[seg_id].sequence_len;
                 let n_count = graph.segments[seg_id].n_count;
+                let cg_count = graph.segments[seg_id].cg_count;
                 // Proportion of N's in this segment (for uncalled base coloring)
                 let n_proportion = if seg_len > 0 {
                     n_count as f64 / seg_len as f64
+                } else {
+                    0.0
+                };
+                let cg_proportion = if seg_len > 0 {
+                    cg_count as f64 / seg_len as f64
                 } else {
                     0.0
                 };
@@ -7471,6 +7673,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                     }
                     entry.mean_pos += path_pos as f64;
                     entry.mean_uncalled += n_proportion;
+                    entry.mean_cpg += cg_proportion;
                     if is_highlighted {
                         entry.highlighted = true;
                     }
@@ -7484,6 +7687,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
             if v.mean_depth > 0.0 {
                 v.mean_pos /= v.mean_depth;
                 v.mean_uncalled /= v.mean_depth; // Normalize uncalled proportion
+                v.mean_cpg /= v.mean_depth;
             }
             v.mean_inv /= if v.mean_depth > 0.0 {
                 v.mean_depth
@@ -7522,6 +7726,8 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
                 // Black to green gradient based on proportion of uncalled bases (N's)
                 let green = (bin_info.mean_uncalled * 255.0).min(255.0) as u8;
                 (0, green, 0)
+            } else if args.color_by_cpg_density {
+                cpg_density_color(bin_info.mean_cpg, args.cpg_density_max)
             } else if args.show_strand {
                 // Check if alignment_prefix applies
                 let apply_strand = args
@@ -7934,6 +8140,19 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
 
 fn main() {
     let args = Args::parse();
+
+    // Validate numeric arguments
+    if !(args.cpg_density_max > 0.0 && args.cpg_density_max <= 0.5) {
+        eprintln!(
+            "Error: --cpg-density-max must be in (0, 0.5], got {}",
+            args.cpg_density_max
+        );
+        std::process::exit(1);
+    }
+    if args.min_cluster_size == 0 {
+        eprintln!("Error: --min-cluster-size must be >= 1, got 0");
+        std::process::exit(1);
+    }
 
     // Initialize logger based on verbosity
     env_logger::Builder::new()

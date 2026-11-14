@@ -112,6 +112,16 @@ gfalook -i graph.gfa -o compressed.png -x 1000 -y 100 -O
 
 ![Compressed mode](images/compressed.png)
 
+### CpG density coloring (`--color-by-cpg-density`)
+
+Color bins by the density of CG dinucleotides inside each node, from light grey (0 CG per bp) to near-black. `--cpg-density-max` sets the density that maps to near-black (default 0.10 = 10 CG per 100 bp, a typical CpG island). CG dinucleotides that span two nodes are not counted.
+
+```bash
+gfalook -i graph.gfa -o cpg.png -x 1000 -y 500 --color-by-cpg-density
+```
+
+![CpG density coloring](images/cpg.png)
+
 ### Path clustering (`-k`)
 
 Automatically cluster and reorder paths by similarity. Colored bars on the left indicate cluster membership. Combined with `-m` for better visibility:
@@ -168,6 +178,16 @@ gfalook -i graph.gfa -o upgma_fine.png -x 1000 -y 500 -k --use-upgma --upgma-thr
 ```
 
 ![UPGMA fine clustering](images/upgma_fine.png)
+
+### Minimum cluster size (`--min-cluster-size`)
+
+Merge clusters with fewer than N paths into their nearest cluster (single-linkage distance), starting from the smallest. On this graph, `-k` alone gives 7 clusters (50, 19, 13, 4, 2, 1, 1 paths), `--min-cluster-size 5` gives 4 (53, 19, 13, 5):
+
+```bash
+gfalook -i graph.gfa -o clustered_min_size.png -x 1000 -y 500 -k -m --min-cluster-size 5
+```
+
+![Minimum cluster size](images/clustered_min_size.png)
 
 ### X-axis with pangenomic coordinates (`--x-axis pangenomic`)
 
