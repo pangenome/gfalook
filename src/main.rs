@@ -603,9 +603,22 @@ struct Args {
     )]
     x_ticks: u32,
 
-    /// Show absolute coordinates by adding the subpath start position (from name:start-end format). Cannot be used with "pangenomic".
-    #[arg(long = "x-axis-absolute", requires = "x_axis", help_heading = "X-Axis")]
+    /// Show absolute coordinates by adding the subpath start position (from name:start-end format). Applies to --x-axis and --ref-axis. Has no effect with "pangenomic".
+    #[arg(long = "x-axis-absolute", help_heading = "X-Axis")]
     x_axis_absolute: bool,
+
+    // === Reference Axis ===
+    /// Draw a linear axis of this path under the graph. Lines link reference positions to the graph columns that hold them (LD-plot style).
+    #[arg(long = "ref-axis", value_name = "PATH_NAME", help_heading = "Reference Axis")]
+    ref_axis: Option<String>,
+
+    /// Ranges on the reference axis: "parts:N" (N equal parts), "step:BP" (one range every BP bp), "bubbles[:F]" (boundaries at nodes traversed once by >= F of the displayed paths, default F 0.9), or a BED file (path name, start, end, optional name; 0-based, path-relative).
+    #[arg(long = "ref-ranges", value_name = "SPEC", default_value = "parts:10", requires = "ref_axis", help_heading = "Reference Axis")]
+    ref_ranges: String,
+
+    /// Minimum range length in bp for "bubbles". Default: reference length / 50.
+    #[arg(long = "ref-min-range", value_name = "BP", requires = "ref_axis", help_heading = "Reference Axis")]
+    ref_min_range: Option<u64>,
 
     // === Annotation ===
     /// Load path annotations from TSV file (columns: prefix, annotation). Prefix matches path names.
@@ -4969,6 +4982,426 @@ fn get_depth_color(
     }
 }
 
+/// Print an error and exit with status 1.
+fn die(msg: String) -> ! {
+    eprintln!("[gfalook] error: {}", msg);
+    std::process::exit(1);
+}
+
+/// One step of the reference path, in path and graph coordinates.
+struct RefStep {
+    start: u64,
+    offset: u64,
+    len: u64,
+    rev: bool,
+    seg: usize,
+}
+
+/// One range on the reference axis (0-based, half-open, path-relative).
+struct RefRange {
+    start: u64,
+    end: u64,
+    name: Option<String>,
+}
+
+/// Drawing primitive of the reference axis panel. x is relative to the
+/// first graph column, y to the panel top. Text y is the top of the glyphs.
+enum RefPrim {
+    Line(f64, f64, f64, f64, (u8, u8, u8)),
+    Rect(f64, f64, f64, f64, (u8, u8, u8)),
+    Text(f64, f64, String, i8), // anchor: -1 start, 0 middle, 1 end
+}
+
+const REF_STRIP_H: f64 = 5.0;
+const REF_FAN_TOP: f64 = 6.0;
+const REF_FAN_BOT: f64 = 46.0;
+const REF_BOX_H: f64 = 6.0;
+const REF_AXIS_Y: f64 = 53.0;
+const REF_TICK_H: f64 = 4.0;
+const REF_LABEL_Y: f64 = 58.0;
+const REF_NAME_Y: f64 = 70.0;
+const REF_CHAR_W: f64 = 8.0;
+
+/// Format a tick with enough decimals to tell ticks apart.
+fn format_tick(v: u64, step: f64) -> String {
+    let (unit, suffix) = match v {
+        1_000_000_000.. => (1e9, "G"),
+        1_000_000.. => (1e6, "M"),
+        1_000.. => (1e3, "K"),
+        _ => return v.to_string(),
+    };
+    let dec = (unit / step).log10().ceil().clamp(1.0, 6.0) as usize;
+    format!("{:.*}{}", dec, v as f64 / unit, suffix)
+}
+
+/// Graph position of path position p.
+fn ref_graph_pos(steps: &[RefStep], p: u64) -> u64 {
+    let s = &steps[steps.partition_point(|s| s.start <= p) - 1];
+    let d = p - s.start;
+    if s.rev {
+        s.offset + s.len - 1 - d
+    } else {
+        s.offset + d
+    }
+}
+
+/// Anchor-run starts on the reference path.
+fn ref_bubble_bounds(
+    graph: &Graph,
+    display_paths: &[&GfaPath],
+    steps: &[RefStep],
+    frac: f64,
+) -> Vec<u64> {
+    let n = graph.segments.len();
+    let need = ((frac * display_paths.len() as f64).ceil() as u32).max(1);
+    let mut visits = vec![0u32; n];
+    let mut once = vec![0u32; n];
+    for p in display_paths {
+        for s in &p.steps {
+            visits[s.segment_id as usize] += 1;
+        }
+        for s in &p.steps {
+            let id = s.segment_id as usize;
+            if visits[id] == 1 {
+                once[id] += 1;
+            }
+            visits[id] = 0;
+        }
+    }
+    let anchor: Vec<bool> = once.iter().map(|&c| c >= need).collect();
+    let mut bounds = Vec::new();
+    let mut prev = false;
+    for s in steps {
+        let a = anchor[s.seg];
+        if a && !prev {
+            bounds.push(s.start);
+        }
+        prev = a;
+    }
+    info!(
+        "Ref ranges bubbles:{}: {} of {} nodes are anchors (traversed once by >= {} of {} paths), {} anchor runs on the reference",
+        frac,
+        anchor.iter().filter(|&&a| a).count(),
+        n,
+        need,
+        display_paths.len(),
+        bounds.len()
+    );
+    bounds
+}
+
+/// Load reference ranges from a BED file.
+fn load_ref_bed(path: &Path, ref_name: &str, len: u64) -> Vec<RefRange> {
+    let file = File::open(path)
+        .unwrap_or_else(|e| die(format!("cannot open --ref-ranges BED {:?}: {}", path, e)));
+    let mut ranges = Vec::new();
+    for (i, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.unwrap_or_else(|e| die(format!("{:?}:{}: {}", path, i + 1, e)));
+        let line = line.trim_end();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with("track")
+            || line.starts_with("browser")
+        {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 {
+            die(format!("{:?}:{}: expected >= 3 tab-separated columns, got {}", path, i + 1, cols.len()));
+        }
+        if cols[0] != ref_name {
+            die(format!("{:?}:{}: path '{}' is not the --ref-axis path '{}'", path, i + 1, cols[0], ref_name));
+        }
+        let parse = |s: &str| {
+            s.parse::<u64>()
+                .unwrap_or_else(|_| die(format!("{:?}:{}: bad coordinate '{}'", path, i + 1, s)))
+        };
+        let (start, end) = (parse(cols[1]), parse(cols[2]));
+        if start >= end || end > len {
+            die(format!("{:?}:{}: range {}-{} is empty or beyond the path length {}", path, i + 1, start, end, len));
+        }
+        let name = cols.get(3).map(|s| s.to_string());
+        ranges.push(RefRange { start, end, name });
+    }
+    if ranges.is_empty() {
+        die(format!("{:?}: no BED ranges", path));
+    }
+    ranges.sort_by_key(|r| r.start);
+    ranges
+}
+
+/// Ranges between consecutive boundaries.
+fn ranges_from_bounds(bounds: &[u64], len: u64) -> Vec<RefRange> {
+    let mut b: Vec<u64> = bounds.iter().copied().filter(|&x| x > 0 && x < len).collect();
+    b.insert(0, 0);
+    b.push(len);
+    b.dedup();
+    b.windows(2)
+        .map(|w| RefRange { start: w[0], end: w[1], name: None })
+        .collect()
+}
+
+/// Build the reference axis panel.
+fn build_ref_axis(
+    args: &Args,
+    graph: &Graph,
+    display_paths: &[&GfaPath],
+    viz_width: u32,
+    bin_width: f64,
+) -> (Vec<RefPrim>, f64) {
+    let name = args.ref_axis.as_ref().unwrap();
+    let path = graph
+        .paths
+        .iter()
+        .find(|p| &p.name == name)
+        .unwrap_or_else(|| die(format!("--ref-axis path '{}' not found in the graph", name)));
+    let mut pos = 0u64;
+    let steps: Vec<RefStep> = path
+        .steps
+        .iter()
+        .map(|s| {
+            let seg = s.segment_id as usize;
+            let len = graph.segments[seg].sequence_len;
+            let st = RefStep { start: pos, offset: graph.segment_offsets[seg], len, rev: s.is_reverse, seg };
+            pos += len;
+            st
+        })
+        .collect();
+    let len = pos;
+    if len == 0 {
+        die(format!("--ref-axis path '{}' has length 0", name));
+    }
+    // Count steps that go back in graph order
+    let back: Vec<&RefStep> = steps.windows(2).filter(|w| w[1].offset < w[0].offset).map(|w| &w[1]).collect();
+    info!(
+        "Ref axis '{}': {} of {} steps ({} bp of {} bp) go back in graph order, {} steps reverse",
+        name,
+        back.len(),
+        steps.len(),
+        back.iter().map(|s| s.len).sum::<u64>(),
+        pos,
+        steps.iter().filter(|s| s.rev).count()
+    );
+    if !back.is_empty() && args.ref_sort.as_deref() != Some(name.as_str()) {
+        info!("Hint: rerun with --ref-sort '{}' and compare this count. It drops when the graph order or strand differs from the reference, not inside repeats", name);
+    }
+    let spec = args.ref_ranges.as_str();
+    let parse_num = |s: &str| {
+        s.parse::<u64>()
+            .ok()
+            .filter(|&v| v > 0)
+            .unwrap_or_else(|| die(format!("--ref-ranges '{}': expected a positive integer", spec)))
+    };
+    let ranges = if let Some(n) = spec.strip_prefix("parts:") {
+        let n = parse_num(n).min(len);
+        ranges_from_bounds(&(0..n).map(|i| i * len / n).collect::<Vec<_>>(), len)
+    } else if let Some(bp) = spec.strip_prefix("step:") {
+        let bp = parse_num(bp);
+        ranges_from_bounds(&(0..len).step_by(bp as usize).collect::<Vec<_>>(), len)
+    } else if spec == "bubbles" || spec.starts_with("bubbles:") {
+        let frac = spec.strip_prefix("bubbles:").map_or(0.9, |f| {
+            f.parse::<f64>()
+                .ok()
+                .filter(|&f| f > 0.0 && f <= 1.0)
+                .unwrap_or_else(|| die(format!("--ref-ranges '{}': F must be in (0, 1]", spec)))
+        });
+        let min = args.ref_min_range.unwrap_or((len / 50).max(1));
+        let mut kept = Vec::new();
+        let mut last = 0u64;
+        for b in ref_bubble_bounds(graph, display_paths, &steps, frac) {
+            if b >= last + min && len - b >= min {
+                kept.push(b);
+                last = b;
+            }
+        }
+        info!("Ref ranges bubbles: {} boundaries kept with --ref-min-range {} bp", kept.len(), min);
+        if kept.is_empty() {
+            die(format!("--ref-ranges '{}': no range boundary on '{}' (min range {} bp). Lower F or --ref-min-range", spec, name, min));
+        }
+        ranges_from_bounds(&kept, len)
+    } else {
+        load_ref_bed(Path::new(spec), name, len)
+    };
+    let is_bed = ranges.iter().any(|r| r.name.is_some());
+    info!(
+        "Ref axis '{}': {} bp, {} steps, --ref-ranges '{}' gives {} ranges",
+        name, len, steps.len(), spec, ranges.len()
+    );
+
+    let w = viz_width as f64 - 1.0;
+    let lin = |p: u64| p as f64 / len as f64 * w;
+    let gx = |p: u64| (ref_graph_pos(&steps, p.min(len - 1)) as f64 / bin_width).min(w);
+    let mut prims = Vec::new();
+    let (mut names_drawn, mut names_skipped, mut last_name_end) = (0, 0, f64::MIN);
+    for (i, r) in ranges.iter().enumerate() {
+        let c = ANNOTATION_COLORS[i % ANNOTATION_COLORS.len()];
+        // Graph columns covered by the range
+        let mut cols: Vec<(u64, u64)> = Vec::new();
+        let first = steps.partition_point(|s| s.start + s.len <= r.start);
+        for s in steps[first..].iter().take_while(|s| s.start < r.end) {
+            let (a, b) = (r.start.max(s.start) - s.start, r.end.min(s.start + s.len) - s.start);
+            if a >= b {
+                continue;
+            }
+            let (ga, gb) = if s.rev { (s.offset + s.len - b, s.offset + s.len - a) } else { (s.offset + a, s.offset + b) };
+            cols.push(((ga as f64 / bin_width) as u64, ((gb - 1) as f64 / bin_width) as u64));
+        }
+        cols.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::new();
+        for (a, b) in cols {
+            match merged.last_mut() {
+                Some(m) if a <= m.1 + 1 => m.1 = m.1.max(b),
+                _ => merged.push((a, b)),
+            }
+        }
+        for (a, b) in merged {
+            prims.push(RefPrim::Rect(a as f64, 0.0, (b - a + 1) as f64, REF_STRIP_H, c));
+        }
+        // Lines from graph columns to the linear axis
+        prims.push(RefPrim::Line(gx(r.start), REF_FAN_TOP, lin(r.start), REF_FAN_BOT, c));
+        prims.push(RefPrim::Line(gx(r.end - 1), REF_FAN_TOP, lin(r.end), REF_FAN_BOT, c));
+        let (x0, x1) = (lin(r.start), lin(r.end));
+        prims.push(RefPrim::Rect(x0, REF_FAN_BOT, (x1 - x0).max(1.0), REF_BOX_H, c));
+        if let Some(ref n) = r.name {
+            let half = n.len() as f64 * REF_CHAR_W / 2.0;
+            let mid = (x0 + x1) / 2.0;
+            if mid - half > last_name_end + REF_CHAR_W && mid - half >= 0.0 && mid + half <= w {
+                prims.push(RefPrim::Text(mid, REF_NAME_Y, n.clone(), 0));
+                last_name_end = mid + half;
+                names_drawn += 1;
+            } else {
+                names_skipped += 1;
+            }
+        }
+    }
+    if is_bed {
+        info!("Ref axis BED names: {} drawn, {} skipped (overlap or image edge)", names_drawn, names_skipped);
+    }
+    // Linear axis with ticks
+    prims.push(RefPrim::Line(0.0, REF_AXIS_Y, w, REF_AXIS_Y, (0, 0, 0)));
+    let offset = if args.x_axis_absolute { parse_subpath_start(name) } else { 0 };
+    let n = args.x_ticks.max(2) as usize;
+    for i in 0..n {
+        let t = i as f64 / (n - 1) as f64;
+        let x = t * w;
+        prims.push(RefPrim::Line(x, REF_AXIS_Y, x, REF_AXIS_Y + REF_TICK_H, (0, 0, 0)));
+        let anchor = if i == 0 { -1 } else if i == n - 1 { 1 } else { 0 };
+        let label = format_tick(offset + (t * len as f64) as u64, len as f64 / (n - 1) as f64);
+        prims.push(RefPrim::Text(x, REF_LABEL_Y, label, anchor));
+    }
+    let label = if args.x_axis_absolute { strip_subpath_range(name) } else { name.as_str() };
+    prims.push(RefPrim::Text(-4.0, REF_AXIS_Y - 4.0, label.to_string(), 1));
+    let height = if is_bed { REF_NAME_Y + 10.0 } else { REF_LABEL_Y + 10.0 };
+    (prims, height)
+}
+
+/// Set one RGBA pixel if inside the buffer.
+fn put_rgba(buf: &mut [u8], width: u32, x: i64, y: i64, c: (u8, u8, u8)) {
+    if x < 0 || y < 0 || x >= width as i64 {
+        return;
+    }
+    let idx = ((y as u64 * width as u64 + x as u64) * 4) as usize;
+    if idx + 3 < buf.len() {
+        buf[idx..idx + 4].copy_from_slice(&[c.0, c.1, c.2, 255]);
+    }
+}
+
+/// Draw bold 5x8 text into an RGBA buffer.
+fn draw_text_rgba(buf: &mut [u8], width: u32, x: i64, y: u32, text: &str) {
+    let cw = REF_CHAR_W as i64;
+    for (j, ch) in text.bytes().enumerate() {
+        let cx = x + j as i64 * cw;
+        if cx < 0 || cx + cw + 1 > width as i64 {
+            continue;
+        }
+        let glyph = &FONT_5X8[if ch < 128 { ch as usize } else { b'?' as usize }];
+        for dx in 0..2 {
+            write_char(buf, width, (cx + dx) as u32, y, glyph, cw as u32, 0, 0, 0);
+        }
+    }
+}
+
+/// Draw the reference axis panel into the PNG buffers.
+fn draw_ref_axis_png(
+    prims: &[RefPrim],
+    buf: &mut [u8],
+    width: u32,
+    x0: u32,
+    y0: u32,
+    names: &mut [u8],
+    names_w: u32,
+) {
+    let (ox, oy) = (x0 as i64, y0 as i64);
+    for p in prims {
+        match p {
+            RefPrim::Line(xa, ya, xb, yb, c) => {
+                let (mut x, mut y) = (xa.round() as i64, ya.round() as i64);
+                let (x1, y1) = (xb.round() as i64, yb.round() as i64);
+                let (dx, dy) = ((x1 - x).abs(), -(y1 - y).abs());
+                let (sx, sy) = (if x < x1 { 1 } else { -1 }, if y < y1 { 1 } else { -1 });
+                let mut err = dx + dy;
+                loop {
+                    put_rgba(buf, width, ox + x, oy + y, *c);
+                    if x == x1 && y == y1 {
+                        break;
+                    }
+                    let e2 = 2 * err;
+                    if e2 >= dy {
+                        err += dy;
+                        x += sx;
+                    }
+                    if e2 <= dx {
+                        err += dx;
+                        y += sy;
+                    }
+                }
+            }
+            RefPrim::Rect(x, y, w, h, c) => {
+                let (xa, ya) = (x.round() as i64, y.round() as i64);
+                for yy in ya..ya + (h.round() as i64).max(1) {
+                    for xx in xa..xa + (w.round() as i64).max(1) {
+                        put_rgba(buf, width, ox + xx, oy + yy, *c);
+                    }
+                }
+            }
+            RefPrim::Text(x, y, t, anchor) => {
+                let tw = t.len() as f64 * REF_CHAR_W;
+                let start = x - tw * (*anchor as f64 + 1.0) / 2.0;
+                if *x < 0.0 {
+                    if names_w > 0 {
+                        draw_text_rgba(names, names_w, names_w as i64 + start.round() as i64, y0 + *y as u32, t);
+                    }
+                } else {
+                    let s = (start.round() as i64).max(0);
+                    draw_text_rgba(buf, width, ox + s, y0 + *y as u32, t);
+                }
+            }
+        }
+    }
+}
+
+/// Render the reference axis panel as SVG elements.
+fn ref_axis_svg(prims: &[RefPrim], x0: f64, y0: f64) -> String {
+    let mut s = String::new();
+    for p in prims {
+        match p {
+            RefPrim::Line(xa, ya, xb, yb, c) => s.push_str(&format!(
+                "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"rgb({},{},{})\" stroke-width=\"1\"/>\n",
+                x0 + xa, y0 + ya, x0 + xb, y0 + yb, c.0, c.1, c.2
+            )),
+            RefPrim::Rect(x, y, w, h, c) => s.push_str(&format!(
+                "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" fill=\"rgb({},{},{})\"/>\n",
+                x0 + x, y0 + y, w, h, c.0, c.1, c.2
+            )),
+            RefPrim::Text(x, y, t, anchor) => s.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" font-family=\"'DejaVu Sans Mono', 'Courier New', monospace\" font-size=\"10\" font-weight=\"bold\" text-anchor=\"{}\" fill=\"black\">{}</text>\n",
+                x0 + x, y0 + y + 8.0, ["start", "middle", "end"][(*anchor + 1) as usize], escape_xml(t)
+            )),
+        }
+    }
+    s
+}
+
 fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     // Check for conflicting options
     if args.cluster_paths && args.prefix_merges.is_some() {
@@ -5300,8 +5733,13 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
     let scale_y_edges = edge_height as f64 / len_to_visualize as f64;
 
     let total_width = viz_width + path_names_width;
+    let ref_axis = args
+        .ref_axis
+        .as_ref()
+        .map(|_| build_ref_axis(args, graph, &display_paths, viz_width, bin_width));
+    let ref_axis_height = ref_axis.as_ref().map_or(0, |r| r.1 as u32);
     // Calculate max axis height for buffer allocation (16 pixels when enabled)
-    let max_axis_height: u32 = if args.x_axis.is_some() { 16 } else { 0 };
+    let max_axis_height: u32 = if args.x_axis.is_some() { 16 } else { 0 } + ref_axis_height;
     // Initial height - will be cropped later based on actual edge rendering (includes legend at top)
     let max_possible_height = legend_height + path_space + max_axis_height + edge_height;
 
@@ -6413,8 +6851,15 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
         }
     }
 
+    // Render reference axis below the x-axis
+    if let Some((ref prims, _)) = ref_axis {
+        let y0 = legend_height + path_space + axis_total_height;
+        draw_ref_axis_png(prims, &mut buffer, total_width, path_names_width, y0, &mut path_names_buffer, path_names_width);
+        max_y = max_y.max(y0 + ref_axis_height);
+    }
+
     // Adjust path_space to include legend height and axis height for edge rendering
-    let path_space_with_axis = legend_height + path_space + axis_total_height;
+    let path_space_with_axis = legend_height + path_space + axis_total_height + ref_axis_height;
 
     // Render edges in the bottom area
     let mut edge_count = 0;
@@ -8055,8 +8500,19 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
         max_y = path_space_with_gap + axis_total_height;
     }
 
+    // Render reference axis below the x-axis
+    let mut ref_axis_height = 0.0;
+    if args.ref_axis.is_some() {
+        let (prims, h) = build_ref_axis(args, graph, &display_paths, viz_width, bin_width);
+        let x0 = dendrogram_width + cluster_bar_width + bar_gap + annotation_bar_width + text_width;
+        let y0 = legend_height + path_space_with_gap + axis_total_height;
+        svg.push_str(&ref_axis_svg(&prims, x0, y0));
+        ref_axis_height = h;
+        max_y = max_y.max(y0 + h);
+    }
+
     // Render edges as SVG paths (offset by x-axis height if present)
-    let edge_base_y = path_space_with_gap + axis_total_height;
+    let edge_base_y = path_space_with_gap + axis_total_height + ref_axis_height;
 
     for edge in &graph.edges {
         let from_id = edge.from_id as usize;
@@ -8147,6 +8603,14 @@ fn main() {
             "Error: --cpg-density-max must be in (0, 0.5], got {}",
             args.cpg_density_max
         );
+        std::process::exit(1);
+    }
+    if args.x_axis_absolute && args.x_axis.is_none() && args.ref_axis.is_none() {
+        eprintln!("Error: --x-axis-absolute requires --x-axis or --ref-axis");
+        std::process::exit(1);
+    }
+    if args.ref_min_range == Some(0) {
+        eprintln!("Error: --ref-min-range must be >= 1, got 0");
         std::process::exit(1);
     }
     if args.min_cluster_size == 0 {
