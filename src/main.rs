@@ -430,6 +430,10 @@ struct Args {
     )]
     link_path_pieces: Option<f64>,
 
+    /// Do not draw the edges (links between nodes) under the paths, or in the 2D layout.
+    #[arg(long = "hide-edges", visible_alias = "hide-links", help_heading = "Path Appearance")]
+    hide_edges: bool,
+
     // === Path Names ===
     /// Hide the path names on the left of the generated image.
     #[arg(short = 'H', long = "hide-path-names", help_heading = "Path Names")]
@@ -1937,7 +1941,7 @@ fn render_layout_png(
     let px = layout_to_pixels(layout, width, height, padding);
 
     let edge_color = (200u8, 200u8, 200u8);
-    for e in &graph.edges {
+    for e in graph.edges.iter().filter(|_| !args.hide_edges) {
         let (x1, y1) = px[exit_endpoint(e.from_id, e.from_rev)];
         let (x2, y2) = px[entry_endpoint(e.to_id, e.to_rev)];
         draw_line_rgb(&mut buf, width, height, x1, y1, x2, y2, edge_color);
@@ -1972,7 +1976,7 @@ fn render_layout_svg(layout: &Layout2D, graph: &Graph, args: &Args) -> String {
         width, height
     ));
     out.push_str("<g stroke=\"#c8c8c8\" stroke-width=\"0.5\">\n");
-    for e in &graph.edges {
+    for e in graph.edges.iter().filter(|_| !args.hide_edges) {
         let (x1, y1) = px[exit_endpoint(e.from_id, e.from_rev)];
         let (x2, y2) = px[entry_endpoint(e.to_id, e.to_rev)];
         out.push_str(&format!(
@@ -6938,7 +6942,7 @@ fn render(args: &Args, graph: &Graph) -> Vec<u8> {
 
     // Render edges in the bottom area
     let mut edge_count = 0;
-    for edge in &graph.edges {
+    for edge in graph.edges.iter().filter(|_| !args.hide_edges) {
         let from_id = edge.from_id as usize;
         let to_id = edge.to_id as usize;
 
@@ -8591,7 +8595,7 @@ fn render_svg(args: &Args, graph: &Graph) -> String {
     // Render edges as SVG paths (offset by x-axis height if present)
     let edge_base_y = path_space_with_gap + axis_total_height + ref_axis_height;
 
-    for edge in &graph.edges {
+    for edge in graph.edges.iter().filter(|_| !args.hide_edges) {
         let from_id = edge.from_id as usize;
         let to_id = edge.to_id as usize;
 
@@ -8716,6 +8720,9 @@ fn main() {
 
     if graph.paths.is_empty() {
         eprintln!("Warning: No paths found in the GFA file.");
+    }
+    if args.hide_edges {
+        info!("--hide-edges: not drawing {} edges", graph.edges.len());
     }
 
     if let Some(ref_name) = &args.ref_sort {
