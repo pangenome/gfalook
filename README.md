@@ -239,6 +239,8 @@ gfalook -i graph.gfa -o ref_axis.png -x 1000 -y 500 -m \
 
 ![Reference axis](images/ref_axis.png)
 
+The chm13 row is linear on the reference axis, but it is not linear in the graph. chm13 has 2 copies of C4, and the graph merges them into one set of columns. With `-m`, the chm13 row is dark red (depth 2) on those columns. In the panel, ranges 1 to 4 run left to right, range 5 jumps back, and ranges 6 to 8 run again over the same columns. 64816 of the 83600 chm13 bp are in nodes that chm13 walks twice.
+
 Add `--hide-edges` (alias `--hide-links`) to drop the edges under the panel. It works in every mode, 2D layout included.
 
 `--ref-ranges` sets the ranges:
@@ -249,7 +251,7 @@ Add `--hide-edges` (alias `--hide-links`) to drop the edges under the panel. It 
 - a BED file: path name, start, end, optional name (0-based, half-open, path-relative). The name is drawn under its box when it fits. A row with a different path name or a range beyond the path is an error.
 
 ```bash
-gfalook -i graph.gfa -o ref_axis_bubbles.png -x 1000 -y 500 -m \
+gfalook -i graph.gfa -o ref_axis_bubbles.png -x 1000 -y 500 -m --hide-edges \
     --ref-axis "chm13#chr6:31825251-31908851" --ref-ranges bubbles
 gfalook -i graph.gfa -o genes.png -x 1000 -y 500 -m \
     --ref-axis "chm13#chr6:31825251-31908851" --ref-ranges genes.bed
@@ -257,12 +259,12 @@ gfalook -i graph.gfa -o genes.png -x 1000 -y 500 -m \
 
 ![Reference axis with bubble ranges](images/ref_axis_bubbles.png)
 
-gfalook logs how many reference steps go back in graph order. When the graph order or strand differs from the reference, `--ref-sort <PATH>` orders the graph by it and the lines stop crossing. `--ref-sort` also flips nodes so the reference walks them forward, as `odgi groom -R` does: other nodes take the orientation most paths give them, relative to the reference. This haplotype is on the reverse strand: without `--ref-sort`, 1155 of 1156 steps go back and 1156 are reverse. With it, 0 go back and 0 are reverse.
+gfalook logs how many reference steps go back in graph order. When the graph order or strand differs from the reference, `--ref-sort <PATH>` orders the graph by it and the lines stop crossing. `--ref-sort` also flips nodes so the reference walks them forward, as `odgi groom -R` does: other nodes take the orientation most paths give them, relative to the reference. This haplotype is on the reverse strand: without `--ref-sort`, 1155 of 1156 steps go back and 1156 are reverse. With it, 0 go back and 0 are reverse. With `-z` (black forward, red reverse) the strand is visible in the paths: without `--ref-sort` the reference row is red, with it the reference row is black and red marks the paths on the other strand.
 
 ```bash
-gfalook -i graph.gfa -o ref_axis_reverse.png -x 1000 -y 500 -m \
+gfalook -i graph.gfa -o ref_axis_reverse.png -x 1000 -y 500 -z --hide-edges \
     --ref-axis "HG00438#2#JAHBCA010000042.1:24398231-24449090" --ref-ranges parts:8
-gfalook -i graph.gfa -o ref_axis_reverse_sorted.png -x 1000 -y 500 -m \
+gfalook -i graph.gfa -o ref_axis_reverse_sorted.png -x 1000 -y 500 -z --hide-edges \
     --ref-sort "HG00438#2#JAHBCA010000042.1:24398231-24449090" \
     --ref-axis "HG00438#2#JAHBCA010000042.1:24398231-24449090" --ref-ranges parts:8
 ```
@@ -270,7 +272,18 @@ gfalook -i graph.gfa -o ref_axis_reverse_sorted.png -x 1000 -y 500 -m \
 ![Reverse-strand reference](images/ref_axis_reverse.png)
 ![Reverse-strand reference, sorted](images/ref_axis_reverse_sorted.png)
 
-`--ref-sort` does not always help. `--ref-sort` ranks each node at its first visit, so a reference that crosses a repeat twice jumps back and forth in its second copy. For chm13 in this C4 graph, `--ref-sort` raises the steps that go back from 1 to 115. Compare the logged count with and without it.
+`--ref-sort` folds repeat copies onto one copy. It walks the reference and puts each run of new nodes between the ranked nodes around it, when those are in order. So the reference jumps back once per extra copy. This haplotype has 3 copies of C4 and is on the reverse strand: without `--ref-sort`, 2743 of 2747 steps go back. With it, 2 go back, one per extra copy.
+
+```bash
+gfalook -i graph.gfa -o ref_axis_repeats.png -x 1000 -y 500 -m --hide-edges \
+    --ref-axis "HG02717#2#JAHAOR010000061.1:24159905-24263506"
+gfalook -i graph.gfa -o ref_axis_repeats_sorted.png -x 1000 -y 500 -m --hide-edges \
+    --ref-sort "HG02717#2#JAHAOR010000061.1:24159905-24263506" \
+    --ref-axis "HG02717#2#JAHAOR010000061.1:24159905-24263506"
+```
+
+![Three-copy reference](images/ref_axis_repeats.png)
+![Three-copy reference, sorted](images/ref_axis_repeats_sorted.png)
 
 ### Path annotations (`-E`)
 
