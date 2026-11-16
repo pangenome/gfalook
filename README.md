@@ -239,6 +239,8 @@ gfalook -i graph.gfa -o ref_axis.png -x 1000 -y 500 -m \
 
 ![Reference axis](images/ref_axis.png)
 
+Add `--hide-edges` (alias `--hide-links`) to drop the edges under the panel. It works in every mode, 2D layout included.
+
 `--ref-ranges` sets the ranges:
 
 - `parts:N`: N equal parts (default `parts:10`).
