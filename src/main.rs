@@ -807,6 +807,52 @@ fn orient_by_reference(graph: &mut Graph, ref_idx: usize) {
     );
 }
 
+/// Rank reference nodes along the reference. Walk the reference and collect each run of
+/// nodes not yet ranked. If the nodes around the run are ranked and in order, the run
+/// goes between them, else after all ranked nodes. A second copy of a repeat then
+/// lands on the columns of the first copy, so the reference jumps back once per copy.
+fn ref_node_ranks(path: &GfaPath, n: usize) -> Vec<Option<f64>> {
+    let ids: Vec<usize> = path.steps.iter().map(|s| s.segment_id as usize).collect();
+    let k = ids.len();
+    let mut rank: Vec<Option<f64>> = vec![None; n];
+    let (mut max, mut inserted, mut appended) = (-1.0f64, 0usize, 0usize);
+    let mut i = 0;
+    while i < k {
+        if rank[ids[i]].is_some() {
+            i += 1;
+            continue;
+        }
+        // Run of new nodes [i, j)
+        let mut seen = FxHashSet::default();
+        let mut j = i;
+        while j < k && rank[ids[j]].is_none() && seen.insert(ids[j]) {
+            j += 1;
+        }
+        let run = &ids[i..j];
+        let prev = if i > 0 { rank[ids[i - 1]] } else { None };
+        let next = if j < k { rank[ids[j]] } else { None };
+        match (prev, next) {
+            (Some(a), Some(b)) if b > a => {
+                let m = run.len() as f64 + 1.0;
+                for (t, &id) in run.iter().enumerate() {
+                    rank[id] = Some(a + (b - a) * (t as f64 + 1.0) / m);
+                }
+                inserted += 1;
+            }
+            _ => {
+                for &id in run {
+                    max += 1.0;
+                    rank[id] = Some(max);
+                }
+                appended += 1;
+            }
+        }
+        i = j;
+    }
+    info!("Reference-sort ranks: {} runs of new nodes inserted between ranked nodes, {} appended", inserted, appended);
+    rank
+}
+
 /// Reorder nodes so that, on the linear x-axis, reference-path nodes appear in reference
 /// order and non-reference nodes are interpolated between their reference neighbors along
 /// the paths that touch them (so paths that branch off and rejoin the reference don't get
@@ -824,17 +870,9 @@ fn apply_reference_sort(graph: &mut Graph, ref_name: &str) -> Result<(), String>
     // 0. Orient nodes like odgi groom -R
     orient_by_reference(graph, ref_path_idx);
 
-    // 1. Assign integer ranks along the reference path, in order-of-first-visit.
-    let mut ref_rank: Vec<Option<u64>> = vec![None; n];
-    let mut next_rank: u64 = 0;
-    for step in &graph.paths[ref_path_idx].steps {
-        let old = step.segment_id as usize;
-        if ref_rank[old].is_none() {
-            ref_rank[old] = Some(next_rank);
-            next_rank += 1;
-        }
-    }
-    let ref_visited = next_rank;
+    // 1. Rank reference nodes, repeats folded onto one copy.
+    let ref_rank = ref_node_ranks(&graph.paths[ref_path_idx], n);
+    let ref_visited = ref_rank.iter().filter(|r| r.is_some()).count() as u64;
 
     // 2. For each non-reference node, compute a fractional rank via path interpolation.
     //    For every path containing N, find the nearest preceding ref-step and following ref-step;
@@ -851,9 +889,9 @@ fn apply_reference_sort(graph: &mut Graph, ref_name: &str) -> Result<(), String>
         }
 
         // Backward pass: for each position, find the next ref step at or after that index.
-        let mut next_ref_ctx: Vec<Option<(usize, u64)>> = vec![None; k];
+        let mut next_ref_ctx: Vec<Option<(usize, f64)>> = vec![None; k];
         {
-            let mut upcoming: Option<(usize, u64)> = None;
+            let mut upcoming: Option<(usize, f64)> = None;
             for i in (0..k).rev() {
                 let nid = steps[i].segment_id as usize;
                 if let Some(r) = ref_rank[nid] {
@@ -864,7 +902,7 @@ fn apply_reference_sort(graph: &mut Graph, ref_name: &str) -> Result<(), String>
         }
 
         // Forward pass: track last ref step seen, interpolate at each non-ref position.
-        let mut prev_ref: Option<(usize, u64)> = None;
+        let mut prev_ref: Option<(usize, f64)> = None;
         for i in 0..k {
             let nid = steps[i].segment_id as usize;
             if let Some(r) = ref_rank[nid] {
@@ -874,10 +912,10 @@ fn apply_reference_sort(graph: &mut Graph, ref_name: &str) -> Result<(), String>
             let candidate: f64 = match (prev_ref, next_ref_ctx[i]) {
                 (Some((pi, pr)), Some((ni, nr))) if ni > pi => {
                     let frac = (i - pi) as f64 / (ni - pi) as f64;
-                    pr as f64 + (nr as f64 - pr as f64) * frac
+                    pr + (nr - pr) * frac
                 }
-                (Some((_, pr)), _) => pr as f64 + 0.5,
-                (_, Some((_, nr))) => nr as f64 - 0.5,
+                (Some((_, pr)), _) => pr + 0.5,
+                (_, Some((_, nr))) => nr - 0.5,
                 (None, None) => continue,
             };
             frac_sum[nid] += candidate;
@@ -889,11 +927,11 @@ fn apply_reference_sort(graph: &mut Graph, ref_name: &str) -> Result<(), String>
     //    reference nodes: their integer rank (as f64)
     //    interpolated non-ref nodes: mean candidate rank
     //    orphans (no ref context seen on any path): rank after everything, in original order
-    let orphan_base: f64 = ref_visited as f64 + n as f64; // far right
+    let orphan_base: f64 = ref_rank.iter().flatten().fold(0.0, |a: f64, &b| a.max(b)) + 1.0 + n as f64; // far right
     let mut keys: Vec<(f64, u64)> = Vec::with_capacity(n);
     for old in 0..n {
         let key = if let Some(r) = ref_rank[old] {
-            r as f64
+            r
         } else if frac_cnt[old] > 0 {
             frac_sum[old] / frac_cnt[old] as f64
         } else {
@@ -5258,7 +5296,7 @@ fn build_ref_axis(
         steps.iter().filter(|s| s.rev).count()
     );
     if !back.is_empty() && args.ref_sort.as_deref() != Some(name.as_str()) {
-        info!("Hint: rerun with --ref-sort '{}' and compare this count. It drops when the graph order or strand differs from the reference, not inside repeats", name);
+        info!("Hint: rerun with --ref-sort '{}' and compare this count", name);
     }
     let spec = args.ref_ranges.as_str();
     let parse_num = |s: &str| {
