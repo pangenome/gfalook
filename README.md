@@ -241,6 +241,15 @@ gfalook -i graph.gfa -o ref_axis.png -x 1000 -y 500 -m \
 
 The chm13 row is linear on the reference axis, but it is not linear in the graph. chm13 has 2 copies of C4, and the graph merges them into one set of columns. With `-m`, the chm13 row is dark red (depth 2) on those columns. In the panel, ranges 1 to 4 run left to right, range 5 jumps back, and ranges 6 to 8 run again over the same columns. 64816 of the 83600 chm13 bp are in nodes that chm13 walks twice.
 
+A haplotype with one copy of C4 on the forward strand follows the graph order, so the lines are vertical without reordering the graph. For HG02622#2, 0 of 1155 steps go back:
+
+```bash
+gfalook -i graph.gfa -o ref_axis_forward.png -x 1000 -y 500 -m --hide-edges \
+    --ref-axis "HG02622#2#JAHAON010000041.1:31973976-32024831" --ref-ranges parts:8
+```
+
+![Forward reference, graph not reordered](images/ref_axis_forward.png)
+
 Add `--hide-edges` (alias `--hide-links`) to drop the edges under the panel. It works in every mode, 2D layout included.
 
 `--ref-ranges` sets the ranges:
